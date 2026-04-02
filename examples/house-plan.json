@@ -1,0 +1,23 @@
+{
+  "sourceText": "# Small House Plan - 3 Bedroom\n# Approx 10.8m x 8.4m\n\nGRID X A=0 B=3600 C=7200 D=10800\nGRID Y 1=0 2=4200 3=8400\n\nLEVEL Ground=0\n\n# External walls\nWALL A1-B1 thickness=110 height=2700\nWALL B1-C1 thickness=110 height=2700\nWALL C1-D1 thickness=110 height=2700\nWALL D1-D2 thickness=110 height=2700\nWALL D2-D3 thickness=110 height=2700\nWALL D3-C3 thickness=110 height=2700\nWALL C3-B3 thickness=110 height=2700\nWALL B3-A3 thickness=110 height=2700\nWALL A3-A2 thickness=110 height=2700\nWALL A2-A1 thickness=110 height=2700\n\n# Internal walls\nWALL B1-B2 thickness=90 height=2700\nWALL C1-C2 thickness=90 height=2700\nWALL B2-C2 thickness=90 height=2700\nWALL A2-B2 thickness=90 height=2700\nWALL C2-D2 thickness=90 height=2700\n\n# Doors\nDOOR A1-B1 offset=900 width=820 height=2040\nDOOR B1-C1 offset=1400 width=820 height=2040\nDOOR B1-B2 offset=1600 width=820 height=2040\nDOOR C1-C2 offset=1600 width=820 height=2040\nDOOR A2-B2 offset=900 width=820 height=2040\nDOOR C2-D2 offset=900 width=820 height=2040\nDOOR B2-C2 offset=1400 width=920 height=2040\n\n# Windows\nWINDOW A2-A1 offset=1200 width=1800 height=1200 sill=900\nWINDOW D1-D2 offset=1200 width=1800 height=1200 sill=900\nWINDOW D2-D3 offset=1200 width=1800 height=1200 sill=900\nWINDOW B3-A3 offset=900 width=1800 height=1200 sill=900\nWINDOW D3-C3 offset=900 width=1800 height=1200 sill=900\n\n# Rooms\nROOM \"Bedroom 1\" walls=A1-B1,B1-B2,B2-A2,A2-A1 level=Ground\nROOM \"Bedroom 2\" walls=B1-C1,C1-C2,C2-B2,B1-B2 level=Ground\nROOM \"Bedroom 3\" walls=C1-D1,D1-D2,D2-C2,C1-C2 level=Ground\nROOM \"Living\" walls=A2-B2,B2-C2,C3-B3,B3-A3,A3-A2 level=Ground\nROOM \"Kitchen\" walls=C2-D2,D2-D3,D3-C3,C3-B3 level=Ground\n\n# Dimensions\nDIM A1-B1-C1-D1 offset=800\nDIM A1-A2-A3 offset=800\nDIM D1-D2-D3 offset=800",
+  "grid": {
+    "xLines": [
+      { "id": "gx_1", "label": "A", "x": 0 },
+      { "id": "gx_2", "label": "B", "x": 3600 },
+      { "id": "gx_3", "label": "C", "x": 7200 },
+      { "id": "gx_4", "label": "D", "x": 10800 }
+    ],
+    "yLines": [
+      { "id": "gy_1", "label": "1", "y": 0 },
+      { "id": "gy_2", "label": "2", "y": 4200 },
+      { "id": "gy_3", "label": "3", "y": 8400 }
+    ]
+  },
+  "levels": [
+    { "z": 0, "label": "Ground" }
+  ],
+  "walls": [],
+  "rooms": [],
+  "dimensions": [],
+  "annotations": []
+}

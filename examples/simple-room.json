@@ -1,0 +1,58 @@
+{
+  "sourceText": "# Simple Room - 3.6m x 4.2m\n# Single room with one door and one window\n\nGRID X A=0 B=3600\nGRID Y 1=0 2=4200\n\nLEVEL Ground=0\n\nWALL A1-B1 thickness=110 height=2700\nWALL B1-B2 thickness=110 height=2700\nWALL B2-A2 thickness=110 height=2700\nWALL A2-A1 thickness=110 height=2700\n\nDOOR A1-B1 offset=900 width=820 height=2040\nWINDOW B1-B2 offset=1200 width=1200 height=1200 sill=900\n\nROOM \"Bedroom\" walls=A1-B1,B1-B2,B2-A2,A2-A1 level=Ground\n\nDIM A1-B1 offset=600\nDIM A1-A2 offset=600",
+  "grid": {
+    "xLines": [
+      { "id": "gx_1", "label": "A", "x": 0 },
+      { "id": "gx_2", "label": "B", "x": 3600 }
+    ],
+    "yLines": [
+      { "id": "gy_1", "label": "1", "y": 0 },
+      { "id": "gy_2", "label": "2", "y": 4200 }
+    ]
+  },
+  "levels": [
+    { "z": 0, "label": "Ground" }
+  ],
+  "walls": [
+    {
+      "id": "wall_1",
+      "centreline": { "start": { "x": 0, "y": 0, "z": 0 }, "end": { "x": 3600, "y": 0, "z": 0 } },
+      "thickness": 110,
+      "height": 2700,
+      "openings": [
+        { "id": "opening_1", "type": "door", "offset": 900, "width": 820, "height": 2040, "sillHeight": 0 }
+      ]
+    },
+    {
+      "id": "wall_2",
+      "centreline": { "start": { "x": 3600, "y": 0, "z": 0 }, "end": { "x": 3600, "y": 4200, "z": 0 } },
+      "thickness": 110,
+      "height": 2700,
+      "openings": [
+        { "id": "opening_2", "type": "window", "offset": 1200, "width": 1200, "height": 1200, "sillHeight": 900 }
+      ]
+    },
+    {
+      "id": "wall_3",
+      "centreline": { "start": { "x": 3600, "y": 4200, "z": 0 }, "end": { "x": 0, "y": 4200, "z": 0 } },
+      "thickness": 110,
+      "height": 2700,
+      "openings": []
+    },
+    {
+      "id": "wall_4",
+      "centreline": { "start": { "x": 0, "y": 4200, "z": 0 }, "end": { "x": 0, "y": 0, "z": 0 } },
+      "thickness": 110,
+      "height": 2700,
+      "openings": []
+    }
+  ],
+  "rooms": [
+    { "id": "room_1", "label": "Bedroom", "wallIds": ["wall_1", "wall_2", "wall_3", "wall_4"], "floorLevel": 0 }
+  ],
+  "dimensions": [
+    { "id": "dim_1", "points": [{ "x": 0, "y": 0, "z": 0 }, { "x": 3600, "y": 0, "z": 0 }], "offset": 600, "direction": "auto" },
+    { "id": "dim_2", "points": [{ "x": 0, "y": 0, "z": 0 }, { "x": 0, "y": 4200, "z": 0 }], "offset": 600, "direction": "auto" }
+  ],
+  "annotations": []
+}
