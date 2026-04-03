@@ -10,7 +10,7 @@
   <header class="toolbar">
     <div class="toolbar-left">
       <h1 class="logo">cHATgpt</h1>
-      <span class="subtitle">Grid Coordinate System</span>
+      <span class="subtitle">Claude Learning to Draw</span>
     </div>
     <div class="toolbar-centre">
       <label for="view-select">View:</label>
@@ -25,9 +25,16 @@
       <label for="example-select">Examples:</label>
       <select id="example-select">
         <option value="">Load example...</option>
+        <option value="griffiths">Griffiths Street (6-Step)</option>
         <option value="simple-room">Simple Room</option>
         <option value="house-plan">House Plan</option>
       </select>
+
+      <div class="step-control">
+        <label for="step-slider">Step:</label>
+        <input type="range" id="step-slider" min="0" max="7" value="7" step="1">
+        <span id="step-label">Step 7: Doors & Windows</span>
+      </div>
     </div>
     <div class="toolbar-right">
       <button id="export-btn" title="Export SVG">Export SVG</button>
@@ -41,32 +48,68 @@
         <h2>Measurement Input (DSL)</h2>
       </div>
       <textarea id="dsl-input" spellcheck="false" placeholder="Enter measurements here...
-Example:
-GRID X A=0 B=3600
-GRID Y 1=0 2=4200
-WALL A1-B1 thickness=110
-WALL B1-B2 thickness=110
-WALL B2-A2 thickness=110
-WALL A2-A1 thickness=110"></textarea>
+
+Scott's 6-Step Method:
+1. GRID X A=0 B=3600    (set up grid)
+2. PERIMETER D/2, G.6/2  (purple dots)
+3. INTERNAL G.6/4, K/4   (blue dots)
+4. EXTERNAL G.6/1.4      (green dots)
+5. WALL D/2-G.6/2        (join the dots)
+6. DOOR / WINDOW          (openings)"></textarea>
       <div class="dsl-help">
         <details>
-          <summary>DSL Reference</summary>
+          <summary>Scott's 6-Step DSL Reference</summary>
           <pre>
-GRID X A=0 B=3600 C=7200    # X-axis grid lines (columns)
-GRID Y 1=0 2=4200 3=8400    # Y-axis grid lines (rows)
-LEVEL Ground=0 First=2700   # Floor levels (Z height)
-WALL A1-B1 thickness=110    # Wall between grid points
-DOOR A1-B1 offset=900 width=820 height=2040
-WINDOW A1-A2 offset=600 width=1200 height=1200 sill=900
-ROOM "Name" walls=A1-B1,B1-B2 level=Ground
-DIM A1-B1 offset=600        # Dimension line
-# Comments start with # or //
+# PRE-STEP: Grid Setup (1m squares at 1:100)
+GRID X A=0 B=1000 C=2000 D=3000
+GRID Y 1=0 2=1000 3=2000
+SCALE 1000              # mm per major square
+
+# STEP 1: Purple dots (perimeter corners)
+PERIMETER D/2, G.6/2, K.2/2.8
+
+# STEP 2: Blue dots (internal walls)
+INTERNAL G.6/4, H.8/4, K/6.8
+
+# STEP 3: Green dots (exterior elements)
+EXTERNAL G.6/1.4, J.6/1.4
+
+# STEP 4: Join the dots (walls)
+WALL D/2-G.6/2 thickness=110
+# All walls MUST be H or V (no diagonals!)
+
+# STEP 5: Wall thickness applied automatically
+# (110mm external, 90mm internal)
+
+# STEP 6: Dimension confirmation
+DIM D/2-G.6/2 offset=800
+
+# STEP 7: Doors & windows
+DOOR D/2-G.6/2 offset=900 width=820
+WINDOW K.2/2.8-K.2/6.8 offset=600 width=1200 sill=900
+
+# Rooms
+ROOM "BED 1" walls=... level=Ground
+LEVEL Ground=0 First=2700
+
+# Decimal grid refs:
+# G.4 = column G + 400mm (2 small squares)
+# K.2 = column K + 200mm (1 small square)
+# Format: Column/Row e.g. G.6/16.4
+
+# Legacy format also supported:
+# WALL A1-B1 thickness=110
           </pre>
         </details>
       </div>
     </section>
 
     <section class="drawing-panel">
+      <div class="drawing-legend">
+        <span class="legend-dot perimeter"></span> Perimeter
+        <span class="legend-dot internal"></span> Internal
+        <span class="legend-dot external"></span> External
+      </div>
       <div class="svg-container">
         <svg id="drawing-svg" xmlns="http://www.w3.org/2000/svg"></svg>
       </div>

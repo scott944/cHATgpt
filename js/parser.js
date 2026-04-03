@@ -2,15 +2,33 @@
  * parser.js - Measurement Input Parser
  * Converts text DSL (hand sketch notes) into Building data
  *
- * DSL Format:
- *   GRID X A=0 B=3600 C=7200
- *   GRID Y 1=0 2=4200 3=8400
- *   LEVEL Ground=0 First=2700
+ * Scott's 6-Step Methodology DSL Format:
+ *
+ *   # Pre-step: Grid setup (1m squares at 1:100, 200mm subdivisions)
+ *   GRID X A=0 B=1000 C=2000 D=3000
+ *   GRID Y 1=0 2=1000 3=2000
+ *   SCALE 1000          # mm per major grid square (default 1000 = 1m)
+ *
+ *   # Step 1: Purple dots — perimeter corners
+ *   PERIMETER D/2, G.6/2, G.6/2.8, K.2/2.8
+ *
+ *   # Step 2: Blue dots — internal walls
+ *   INTERNAL G.6/4, H.8/4, H.8/8, G.6/8
+ *
+ *   # Step 3: Green dots — exterior elements
+ *   EXTERNAL G.6/1.4, J.6/1.4, J.6/2.8
+ *
+ *   # Step 4: Join the dots (walls between dot pairs)
+ *   WALL D/2-G.6/2 thickness=110
+ *   WALL G.6/2-G.6/2.8 thickness=110
+ *
+ *   # Legacy format still supported:
  *   WALL A1-B1 thickness=110 height=2700
  *   DOOR A1-B1 offset=900 width=820 height=2040
  *   WINDOW A1-A2 offset=600 width=1200 height=1200 sill=900
  *   ROOM "Living" walls=A1-B1,B1-B2,B2-A2,A2-A1 level=Ground
  *   DIM A1-B1 offset=600
+ *   LEVEL Ground=0 First=2700
  */
 
 const Parser = (() => {
@@ -20,7 +38,7 @@ const Parser = (() => {
     const lines = text.split("\n");
     let currentZ = 0;
 
-    // First pass: parse GRID and LEVEL lines (needed by other commands)
+    // First pass: parse GRID, SCALE, and LEVEL lines (needed by other commands)
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line || line.startsWith("//") || line.startsWith("#")) continue;
@@ -32,6 +50,9 @@ const Parser = (() => {
       } else if (upper.startsWith("LEVEL ")) {
         const err = parseLevelLine(line, building);
         if (err) errors.push({ line: i + 1, message: err });
+      } else if (upper.startsWith("SCALE ")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[1]) building.grid.scale = parseFloat(parts[1]);
       }
     }
 
@@ -44,14 +65,23 @@ const Parser = (() => {
     // Track wall endpoints for matching
     const wallByEndpoints = new Map();
 
-    // Second pass: parse WALL, DOOR, WINDOW, ROOM, DIM
+    // Second pass: parse DOT, WALL, DOOR, WINDOW, ROOM, DIM
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line || line.startsWith("//") || line.startsWith("#")) continue;
 
       const upper = line.toUpperCase();
 
-      if (upper.startsWith("WALL ")) {
+      if (upper.startsWith("PERIMETER ")) {
+        const err = parseDotLine(line, building, currentZ, Coord.DOT_TYPES.PERIMETER);
+        if (err) errors.push({ line: i + 1, message: err });
+      } else if (upper.startsWith("INTERNAL ")) {
+        const err = parseDotLine(line, building, currentZ, Coord.DOT_TYPES.INTERNAL);
+        if (err) errors.push({ line: i + 1, message: err });
+      } else if (upper.startsWith("EXTERNAL ")) {
+        const err = parseDotLine(line, building, currentZ, Coord.DOT_TYPES.EXTERNAL);
+        if (err) errors.push({ line: i + 1, message: err });
+      } else if (upper.startsWith("WALL ")) {
         const result = parseWallLine(line, building, currentZ);
         if (result.error) {
           errors.push({ line: i + 1, message: result.error });
@@ -67,19 +97,47 @@ const Parser = (() => {
       } else if (upper.startsWith("DIM ")) {
         const err = parseDimLine(line, building, currentZ);
         if (err) errors.push({ line: i + 1, message: err });
-      } else if (upper.startsWith("GRID ") || upper.startsWith("LEVEL ")) {
-        // Already handled
+      } else if (upper.startsWith("GRID ") || upper.startsWith("LEVEL ") || upper.startsWith("SCALE ")) {
+        // Already handled in first pass
       } else {
         errors.push({ line: i + 1, message: `Unknown command: ${line.split(" ")[0]}` });
       }
     }
 
+    // Validate: no diagonal walls (Scott's rule)
+    const warnings = Coord.validateWalls(building);
+    for (const w of warnings) {
+      errors.push({ line: 0, message: `WARNING: ${w.message}` });
+    }
+
     return { building, errors };
   }
 
+  // --- Dot parsing (Steps 1-3) ---
+
+  function parseDotLine(line, building, currentZ, dotType) {
+    // PERIMETER D/2, G.6/2, G.6/2.8, K.2/2.8
+    // INTERNAL G.6/4, H.8/4
+    // EXTERNAL G.6/1.4, J.6/1.4
+    const content = line.replace(/^[A-Z]+\s+/i, "").trim();
+    if (!content) return "Dot line requires at least one coordinate";
+
+    // Split by comma or whitespace
+    const refs = content.split(/[,\s]+/).filter((r) => r.length > 0);
+
+    for (const ref of refs) {
+      const pt = Coord.resolveGridRef(ref, building.grid, currentZ);
+      if (!pt) return `Cannot resolve coordinate: "${ref}"`;
+      Coord.addDot(building, { position: pt, type: dotType, label: ref });
+    }
+    return null;
+  }
+
+  // --- Grid parsing ---
+
   function parseGridLine(line, building) {
-    // GRID X A=0 B=3600 C=7200
-    // GRID Y 1=0 2=4200
+    // GRID X A=0 B=1000 C=2000
+    // GRID Y 1=0 2=1000 3=2000
     const parts = line.trim().split(/\s+/);
     if (parts.length < 3) return "GRID requires axis and at least one value";
 
@@ -120,13 +178,19 @@ const Parser = (() => {
     return null;
   }
 
-  function parseWallLine(line, building, currentZ) {
-    // WALL A1-B1 thickness=110 height=2700
-    const parts = line.trim().split(/\s+/);
-    if (parts.length < 2) return { error: "WALL requires endpoint pair (e.g. A1-B1)" };
+  // --- Wall parsing (Step 4) ---
 
-    const endpoints = parts[1].split("-");
-    if (endpoints.length !== 2) return { error: `Invalid wall endpoints: "${parts[1]}"` };
+  function parseWallLine(line, building, currentZ) {
+    // Supports both formats:
+    //   WALL A1-B1 thickness=110              (legacy: grid intersection refs)
+    //   WALL D/2-G.6/2 thickness=110          (Scott's: slash coordinate refs)
+    //   WALL G.6/2-G.6/2.8 thickness=110
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) return { error: "WALL requires endpoint pair" };
+
+    const wallRef = parts[1];
+    const endpoints = splitWallRef(wallRef);
+    if (!endpoints) return { error: `Invalid wall endpoints: "${wallRef}"` };
 
     const from = Coord.resolveGridRef(endpoints[0], building.grid, currentZ);
     const to = Coord.resolveGridRef(endpoints[1], building.grid, currentZ);
@@ -145,19 +209,36 @@ const Parser = (() => {
     return { wallId, key };
   }
 
+  function splitWallRef(ref) {
+    // Handle "D/2-G.6/2" (Scott's format with slashes)
+    // Handle "A1-B1" (legacy format)
+    // The tricky part: dashes appear in both formats. Use pattern matching.
+
+    // Try Scott's format: look for "xxx/yyy-xxx/yyy"
+    const slashMatch = ref.match(/^([A-Za-z0-9.]+\/[0-9.]+)-([A-Za-z0-9.]+\/[0-9.]+)$/);
+    if (slashMatch) return [slashMatch[1], slashMatch[2]];
+
+    // Try legacy format: "A1-B1" or "A1-B1-C1" (chain, return first pair)
+    const parts = ref.split("-");
+    if (parts.length >= 2) return [parts[0], parts[1]];
+
+    return null;
+  }
+
+  // --- Opening parsing ---
+
   function parseOpeningLine(line, building, wallByEndpoints, currentZ) {
-    // DOOR A1-B1 offset=900 width=820 height=2040
-    // WINDOW A1-A2 offset=600 width=1200 height=1200 sill=900
     const parts = line.trim().split(/\s+/);
     if (parts.length < 2) return "Opening requires wall reference";
 
     const type = parts[0].toUpperCase() === "DOOR" ? "door" : "window";
-    const endpoints = parts[1].split("-");
-    if (endpoints.length !== 2) return `Invalid wall reference: "${parts[1]}"`;
+    const wallRef = parts[1];
+    const endpoints = splitWallRef(wallRef);
+    if (!endpoints) return `Invalid wall reference: "${wallRef}"`;
 
     const key = makeWallKey(endpoints[0], endpoints[1]);
     const wallId = wallByEndpoints.get(key);
-    if (!wallId) return `No wall found for "${parts[1]}" - define the wall first`;
+    if (!wallId) return `No wall found for "${wallRef}" - define the wall first`;
 
     const props = parseProps(parts.slice(2));
     Coord.addOpening(building, wallId, {
@@ -170,8 +251,9 @@ const Parser = (() => {
     return null;
   }
 
+  // --- Room parsing ---
+
   function parseRoomLine(line, building, wallByEndpoints, currentZ) {
-    // ROOM "Living" walls=A1-B1,B1-B2,B2-A2,A2-A1 level=Ground
     const labelMatch = line.match(/"([^"]+)"/);
     const label = labelMatch ? labelMatch[1] : "Room";
 
@@ -179,8 +261,8 @@ const Parser = (() => {
     const wallRefs = props.walls ? props.walls.split(",") : [];
     const wallIds = [];
     for (const ref of wallRefs) {
-      const ep = ref.split("-");
-      if (ep.length !== 2) continue;
+      const ep = splitWallRef(ref);
+      if (!ep) continue;
       const key = makeWallKey(ep[0], ep[1]);
       const wid = wallByEndpoints.get(key);
       if (wid) wallIds.push(wid);
@@ -198,18 +280,23 @@ const Parser = (() => {
     return null;
   }
 
+  // --- Dimension parsing ---
+
   function parseDimLine(line, building, currentZ) {
-    // DIM A1-B1 offset=600
-    // DIM A1-B1-C1 offset=600  (chain dimension)
     const parts = line.trim().split(/\s+/);
     if (parts.length < 2) return "DIM requires point references";
 
-    const refs = parts[1].split("-");
+    // Support both "DIM A1-B1-C1" and "DIM D/2-G.6/2"
+    const refStr = parts[1];
+    const refs = refStr.includes("/")
+      ? refStr.split(/(?<=[0-9.])-(?=[A-Za-z])/) // Split on "-" between coords with slashes
+      : refStr.split("-");
+
     if (refs.length < 2) return "DIM requires at least 2 points";
 
     const points = [];
     for (const ref of refs) {
-      const p = Coord.resolveGridRef(ref, building.grid, currentZ);
+      const p = Coord.resolveGridRef(ref.trim(), building.grid, currentZ);
       if (!p) return `Cannot resolve grid reference: "${ref}"`;
       points.push(p);
     }
@@ -228,7 +315,7 @@ const Parser = (() => {
   function parseProps(parts) {
     const props = {};
     for (const part of parts) {
-      if (part.startsWith('"')) continue; // skip quoted labels
+      if (part.startsWith('"')) continue;
       const eq = part.indexOf("=");
       if (eq > 0) {
         props[part.substring(0, eq).toLowerCase()] = part.substring(eq + 1);
@@ -238,8 +325,7 @@ const Parser = (() => {
   }
 
   function makeWallKey(refA, refB) {
-    // Normalise order so A1-B1 and B1-A1 match the same wall
-    return [refA, refB].sort().join("-");
+    return [refA, refB].sort().join("~");
   }
 
   return { parseInput };

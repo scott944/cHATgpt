@@ -1,55 +1,65 @@
 # cHATgpt
-Greater Transfer
+Greater Transfer — Claude Learning to Draw
 
 ## Grid Coordinate System (X, Y, Z)
 
-A browser-based architectural drafting tool that converts hand sketch measurements into SVG drawings using a grid coordinate system.
+A browser-based architectural drafting tool that converts hand sketch measurements into SVG drawings using Scott's 6-Step methodology.
+
+### Scott's 6-Step Method
+
+Developed by Scott (Absolute Drafting, 27 years experience). Breaks the complex problem of reading hand sketches into small, sequential, verifiable steps.
+
+| Step | What | Colour | DSL Command |
+|------|------|--------|-------------|
+| Pre | Grid setup | — | `GRID X A=0 B=1000` |
+| 1 | Perimeter corners | Purple | `PERIMETER D/2, G.6/2` |
+| 2 | Internal walls | Blue | `INTERNAL G.6/4, K/4` |
+| 3 | Exterior elements | Green | `EXTERNAL G.6/1.4` |
+| 4 | Join the dots | — | `WALL D/2-G.6/2` |
+| 5 | Wall thickness 110mm | — | (automatic) |
+| 6 | Dimension confirmation | — | `DIM D/2-G.6/2` |
+| 7 | Doors & windows | — | `DOOR` / `WINDOW` |
+
+### Key Rules
+
+1. **Grid first** — establish coordinate system before anything else
+2. **Dots before lines** — find all corners before connecting
+3. **No diagonals** — all walls horizontal or vertical. Diagonal = wrong coordinate
+4. **Close enough is good enough** — read intent, not pixel-perfect
+5. **Human confirms** — never adjust dimensions without confirmation
 
 ### Coordinate System
 
-- **X** = horizontal (East-West) — grid columns labelled A, B, C...
-- **Y** = vertical on plan (North-South) — grid rows labelled 1, 2, 3...
-- **Z** = height/elevation — defined by levels (Ground=0, First=2700, etc.)
+- **X** = horizontal (East-West) — grid columns A, B, C...
+- **Y** = vertical on plan (North-South) — grid rows 1, 2, 3...
+- **Z** = height/elevation
 - **Units**: millimetres (Australian construction standard)
-- **Origin (0,0,0)**: bottom-left corner at ground level
-
-### How It Works
-
-1. Define a **grid** with labelled X and Y coordinates
-2. Place **walls** between grid intersections (e.g. `A1-B1`)
-3. Add **doors** and **windows** to walls
-4. Label **rooms** and add **dimensions**
-5. The system renders an SVG architectural drawing in real time
-
-### DSL (Domain Specific Language)
-
-```
-GRID X A=0 B=3600 C=7200        # X-axis grid lines (mm)
-GRID Y 1=0 2=4200 3=8400        # Y-axis grid lines (mm)
-LEVEL Ground=0 First=2700       # Floor levels (Z height)
-WALL A1-B1 thickness=110        # Wall between grid points
-DOOR A1-B1 offset=900 width=820 height=2040
-WINDOW A1-A2 offset=600 width=1200 height=1200 sill=900
-ROOM "Living" walls=A1-B1,B1-B2,B2-A2,A2-A1 level=Ground
-DIM A1-B1 offset=600            # Dimension line
-```
+- **Decimal refs**: G.4 = column G + 400mm, K.2 = column K + 200mm
+- **Format**: `Column/Row` e.g. `D/2`, `G.6/16.4`, `K.2/8.4`
 
 ### Usage
 
 Open `index.html` in a browser. No build tools or dependencies required.
+
+Use the **Step slider** in the toolbar to reveal the drawing layer by layer, following Scott's 6-step sequence.
 
 ### Project Structure
 
 ```
 index.html          Main UI (split panel: DSL input + SVG output)
 css/style.css       Layout and styling
-js/coord.js         Core data model and geometry
-js/parser.js        DSL text parser
-js/renderer.js      SVG drawing engine
-js/app.js           Application controller
+js/coord.js         Core data model, geometry, and validation
+js/parser.js        DSL text parser (supports decimal grid refs)
+js/renderer.js      SVG drawing engine with step-by-step layers
+js/app.js           Application controller with guided workflow
 examples/           Example building data
+METHODOLOGY.md      Scott's complete 6-step methodology document
 ```
 
-### Claude Learning to Draw
+### The Insight
 
-This project teaches Claude to interpret architectural measurements and produce technical drawings. The grid coordinate system provides a structured way to describe spatial relationships that Claude can understand and generate.
+> "You stopped trying to make me read the sketch like a computer, and taught
+> me to read it like a draftsperson. Dots first. Grid reference first.
+> Lines second. Dimensions last."
+
+This project teaches Claude to interpret architectural measurements and produce technical drawings — not through image processing, but through the same coordinate-based thinking a human drafter uses.

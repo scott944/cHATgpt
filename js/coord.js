@@ -2,12 +2,25 @@
  * coord.js - Core Coordinate System & Data Structures
  * Grid Coordinate System (X, Y, Z) for Architectural Drafting
  *
+ * Scott's 6-Step Methodology (Absolute Drafting):
+ *   Pre-step: Establish shared grid (graph paper squares = 1m x 1m)
+ *   Step 1: Purple dots — perimeter corners
+ *   Step 2: Blue dots — internal wall intersections
+ *   Step 3: Green dots — exterior elements (verandas/decks)
+ *   Step 4: Join the dots (H/V lines only — no diagonals!)
+ *   Step 5: Wall thickness 110mm (offset ±55mm from centreline)
+ *   Step 6: Dimension confirmation (human-in-the-loop)
+ *
  * Conventions:
  *   X = horizontal (East-West)
  *   Y = vertical on plan (North-South)
  *   Z = height/elevation
  *   Origin (0,0,0) = bottom-left corner at ground level
  *   Units: millimetres (Australian construction standard)
+ *
+ * Grid refs use decimal notation for 200mm subdivisions:
+ *   G.4 = column G + 400mm, K.2 = column K + 200mm
+ *   Coordinate format: Column/Row e.g. D/2, G.6/16.4, K.2/8.4
  */
 
 const Coord = (() => {
@@ -15,6 +28,23 @@ const Coord = (() => {
   function nextId(prefix) {
     return `${prefix}_${++_idCounter}`;
   }
+
+  // --- Dot Categories (Scott's colour code) ---
+  const DOT_TYPES = {
+    PERIMETER: "perimeter",   // Purple — external wall corners (Step 1)
+    INTERNAL: "internal",     // Blue/Teal — internal wall intersections (Step 2)
+    EXTERNAL: "external",     // Green — verandas, decks, porches (Step 3)
+    DOOR: "door",             // Dark Red — door positions (Step 7)
+    WINDOW: "window",         // Teal rectangle — window positions (Step 7)
+  };
+
+  const DOT_COLOURS = {
+    perimeter: "#6B2D8B",   // Dark purple
+    internal: "#2196F3",    // Blue
+    external: "#4CAF50",    // Green
+    door: "#B71C1C",        // Dark red
+    window: "#00897B",      // Teal
+  };
 
   // --- Data Constructors ---
 
@@ -28,12 +58,14 @@ const Coord = (() => {
 
   function createBuilding() {
     return {
-      grid: { xLines: [], yLines: [] },
+      grid: { xLines: [], yLines: [], scale: 1000 },
       levels: [],
+      dots: [],
       walls: new Map(),
       rooms: new Map(),
       dimensions: [],
       annotations: [],
+      warnings: [],
     };
   }
 
@@ -53,16 +85,89 @@ const Coord = (() => {
     }));
   }
 
+  // --- Dots (Scott's colour-coded markers) ---
+
+  function addDot(building, { position, type, label }) {
+    const dot = {
+      id: nextId("dot"),
+      position: { ...position },
+      type: type || DOT_TYPES.PERIMETER,
+      label: label || "",
+      gridRef: "",
+    };
+    building.dots.push(dot);
+    return dot.id;
+  }
+
+  function getDotsOfType(building, type) {
+    return building.dots.filter((d) => d.type === type);
+  }
+
+  // --- Grid Reference Resolution ---
+  // Supports Scott's decimal notation:
+  //   "B2" = column B, row 2 (standard)
+  //   "G.4/16.4" = column G + 400mm / row 16 + 400mm (Scott's format)
+  //   "K.2/8.4" = column K + 200mm / row 8 + 400mm
+
   function resolveGridRef(ref, grid, z) {
-    // ref e.g. "B2" -> letters = X grid label, digits = Y grid label
-    const match = ref.match(/^([A-Z]+)(\d+)$/);
-    if (!match) return null;
-    const xLabel = match[1];
-    const yLabel = match[2];
-    const xLine = grid.xLines.find((l) => l.label === xLabel);
-    const yLine = grid.yLines.find((l) => l.label === yLabel);
-    if (!xLine || !yLine) return null;
-    return point(xLine.x, yLine.y, z || 0);
+    const scale = grid.scale || 1000; // mm per major grid square (default 1m)
+
+    // Try Scott's slash format first: "G.6/2" or "K.2/8.4"
+    if (ref.includes("/")) {
+      return resolveSlashRef(ref, grid, z, scale);
+    }
+
+    // Try decimal format without slash: "G.4" paired with row context
+    // Standard format: "B2" or "B2.4" — letters=X, digits=Y
+    const match = ref.match(/^([A-Z]+)\.?(\d*)[\s]*(\d+\.?\d*)$/);
+    if (!match) {
+      // Try decimal column: "G.4" with separate row
+      const decMatch = ref.match(/^([A-Z]+)(\.?\d*)$/);
+      if (decMatch) {
+        const xVal = resolveAxisRef(decMatch[1] + (decMatch[2] || ""), grid.xLines, "x", scale);
+        if (xVal !== null) return point(xVal, 0, z || 0); // Row must come from context
+      }
+      return null;
+    }
+
+    const xRef = match[1] + (match[2] ? "." + match[2] : "");
+    const yRef = match[3];
+
+    const xVal = resolveAxisRef(xRef, grid.xLines, "x", scale);
+    const yVal = resolveAxisRef(yRef, grid.yLines, "y", scale);
+
+    if (xVal === null || yVal === null) return null;
+    return point(xVal, yVal, z || 0);
+  }
+
+  function resolveSlashRef(ref, grid, z, scale) {
+    const parts = ref.split("/");
+    if (parts.length !== 2) return null;
+
+    const xVal = resolveAxisRef(parts[0].trim(), grid.xLines, "x", scale);
+    const yVal = resolveAxisRef(parts[1].trim(), grid.yLines, "y", scale);
+
+    if (xVal === null || yVal === null) return null;
+    return point(xVal, yVal, z || 0);
+  }
+
+  function resolveAxisRef(ref, axisLines, axis, scale) {
+    // Handle decimal refs: "G.4" = column G + 0.4 * scale (400mm at 1:100)
+    // Handle whole refs: "G" or "2"
+    const decMatch = ref.match(/^([A-Za-z0-9]+)\.(\d+)$/);
+    if (decMatch) {
+      const baseLabel = decMatch[1];
+      const decimal = parseFloat("0." + decMatch[2]);
+      const baseLine = axisLines.find((l) => l.label === baseLabel);
+      if (!baseLine) return null;
+      const baseVal = axis === "x" ? baseLine.x : baseLine.y;
+      return baseVal + decimal * scale;
+    }
+
+    // Whole number/letter ref
+    const line = axisLines.find((l) => l.label === ref);
+    if (!line) return null;
+    return axis === "x" ? line.x : line.y;
   }
 
   // --- Levels ---
@@ -187,12 +292,62 @@ const Coord = (() => {
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
+  // --- Wall Validation (Scott's Rule: No Diagonals Ever) ---
+
+  function isWallHorizontal(wall) {
+    return Math.abs(wall.centreline.end.y - wall.centreline.start.y) < 1;
+  }
+
+  function isWallVertical(wall) {
+    return Math.abs(wall.centreline.end.x - wall.centreline.start.x) < 1;
+  }
+
+  function validateWalls(building) {
+    // Scott's rule: ALL walls must be horizontal or vertical.
+    // If a wall is diagonal, a coordinate is wrong — flag it.
+    const warnings = [];
+    for (const wall of building.walls.values()) {
+      if (!isWallHorizontal(wall) && !isWallVertical(wall)) {
+        const s = wall.centreline.start;
+        const e = wall.centreline.end;
+        warnings.push({
+          type: "diagonal",
+          wallId: wall.id,
+          message: `Diagonal wall detected (${s.x},${s.y})→(${e.x},${e.y}). All walls must be H or V. Check coordinates.`,
+        });
+      }
+    }
+    building.warnings = warnings;
+    return warnings;
+  }
+
+  // --- Dimension Adjustment (Step 6) ---
+  // Nudge walls to match confirmed dimensions.
+  // The drawing is already roughly to scale — walls only move a little.
+
+  function adjustWallDimension(building, wallId, confirmedLength) {
+    const wall = building.walls.get(wallId);
+    if (!wall) return false;
+
+    const currentLen = wallLength(wall);
+    const diff = confirmedLength - currentLen;
+    if (Math.abs(diff) < 1) return true; // Already correct
+
+    // Extend/contract from the end point, keeping start fixed
+    const angle = wallAngle(wall);
+    wall.centreline.end.x = wall.centreline.start.x + Math.cos(angle) * confirmedLength;
+    wall.centreline.end.y = wall.centreline.start.y + Math.sin(angle) * confirmedLength;
+
+    return true;
+  }
+
   // --- Serialisation ---
 
   function toJSON(building) {
     return JSON.stringify({
       grid: building.grid,
       levels: building.levels,
+      dots: building.dots,
       walls: Array.from(building.walls.values()),
       rooms: Array.from(building.rooms.values()),
       dimensions: building.dimensions,
@@ -204,7 +359,9 @@ const Coord = (() => {
     const data = typeof json === "string" ? JSON.parse(json) : json;
     const building = createBuilding();
     building.grid = data.grid || { xLines: [], yLines: [] };
+    building.grid.scale = building.grid.scale || 1000;
     building.levels = data.levels || [];
+    building.dots = data.dots || [];
     if (data.walls) {
       for (const w of data.walls) {
         building.walls.set(w.id, w);
@@ -221,12 +378,17 @@ const Coord = (() => {
   }
 
   return {
+    DOT_TYPES,
+    DOT_COLOURS,
     point,
     line,
     createBuilding,
     setGrid,
     resolveGridRef,
+    resolveAxisRef,
     addLevel,
+    addDot,
+    getDotsOfType,
     addWall,
     addOpening,
     defineRoom,
@@ -236,6 +398,10 @@ const Coord = (() => {
     wallVertices,
     getBoundingBox,
     distanceBetween,
+    isWallHorizontal,
+    isWallVertical,
+    validateWalls,
+    adjustWallDimension,
     toJSON,
     fromJSON,
   };

@@ -137,26 +137,39 @@ const Renderer = (() => {
 
     const transform = createTransform(building, svgWidth, svgHeight, "auto", "plan");
 
-    // Layer groups
-    const gridGroup = svgGroup("grid");
-    const wallGroup = svgGroup("walls");
-    const openingGroup = svgGroup("openings");
+    // Layer groups — following Scott's 6-step sequence
+    const gridGroup = svgGroup("grid");         // Pre-step
+    const dotGroup = svgGroup("dots");          // Steps 1-3
+    const wallGroup = svgGroup("walls");        // Steps 4-5
+    const openingGroup = svgGroup("openings");  // Step 7
     const dimGroup = svgGroup("dimensions");
     const labelGroup = svgGroup("labels");
+    const warningGroup = svgGroup("warnings");
     const titleGroup = svgGroup("titleblock");
 
-    drawGrid(gridGroup, building.grid, transform);
-    drawWallsPlan(wallGroup, building, transform);
-    drawOpeningsPlan(openingGroup, building, transform);
-    drawDimensions(dimGroup, building, transform);
+    // Visible steps (controlled by options.visibleSteps)
+    const steps = options.visibleSteps || [0, 1, 2, 3, 4, 5, 6, 7];
+
+    if (steps.includes(0)) drawGrid(gridGroup, building.grid, transform);
+    if (steps.includes(1) || steps.includes(2) || steps.includes(3))
+      drawDots(dotGroup, building, transform, steps);
+    if (steps.includes(4) || steps.includes(5))
+      drawWallsPlan(wallGroup, building, transform, steps.includes(5));
+    if (steps.includes(7))
+      drawOpeningsPlan(openingGroup, building, transform);
+    if (steps.includes(6))
+      drawDimensions(dimGroup, building, transform);
     drawRoomLabels(labelGroup, building, transform);
+    drawDiagonalWarnings(warningGroup, building, transform);
     drawTitleBlock(titleGroup, transform, options.title || "Floor Plan");
 
     svgElement.appendChild(gridGroup);
+    svgElement.appendChild(dotGroup);
     svgElement.appendChild(wallGroup);
     svgElement.appendChild(openingGroup);
     svgElement.appendChild(dimGroup);
     svgElement.appendChild(labelGroup);
+    svgElement.appendChild(warningGroup);
     svgElement.appendChild(titleGroup);
   }
 
@@ -256,20 +269,111 @@ const Renderer = (() => {
     group.appendChild(text);
   }
 
+  // --- Dot Drawing (Steps 1-3: Scott's colour-coded markers) ---
+
+  function drawDots(group, building, transform, visibleSteps) {
+    const stepMap = {
+      [Coord.DOT_TYPES.PERIMETER]: 1,
+      [Coord.DOT_TYPES.INTERNAL]: 2,
+      [Coord.DOT_TYPES.EXTERNAL]: 3,
+    };
+
+    for (const dot of building.dots) {
+      const step = stepMap[dot.type];
+      if (step && !visibleSteps.includes(step)) continue;
+
+      const colour = Coord.DOT_COLOURS[dot.type] || "#999";
+      const sv = worldToSvg(dot.position.x, dot.position.y, transform);
+
+      // Filled circle
+      group.appendChild(svgEl("circle", {
+        cx: sv.x, cy: sv.y, r: 5,
+        fill: colour,
+        stroke: "white",
+        "stroke-width": 1,
+      }));
+
+      // Label (grid ref)
+      if (dot.label) {
+        const text = svgEl("text", {
+          x: sv.x + 8, y: sv.y - 6,
+          "font-family": "Arial, sans-serif",
+          "font-size": "8",
+          fill: colour,
+        });
+        text.textContent = dot.label;
+        group.appendChild(text);
+      }
+    }
+  }
+
+  // --- Diagonal Wall Warnings ---
+
+  function drawDiagonalWarnings(group, building, transform) {
+    if (!building.warnings) return;
+    for (const w of building.warnings) {
+      if (w.type !== "diagonal") continue;
+      const wall = building.walls.get(w.wallId);
+      if (!wall) continue;
+
+      const sv1 = worldToSvg(wall.centreline.start.x, wall.centreline.start.y, transform);
+      const sv2 = worldToSvg(wall.centreline.end.x, wall.centreline.end.y, transform);
+
+      // Red dashed line over the diagonal wall
+      group.appendChild(svgEl("line", {
+        x1: sv1.x, y1: sv1.y,
+        x2: sv2.x, y2: sv2.y,
+        stroke: "#ff0000",
+        "stroke-width": 2,
+        "stroke-dasharray": "6,3",
+      }));
+
+      // Warning icon at midpoint
+      const mx = (sv1.x + sv2.x) / 2;
+      const my = (sv1.y + sv2.y) / 2;
+      const warn = svgEl("text", {
+        x: mx, y: my - 8,
+        "text-anchor": "middle",
+        "font-family": "Arial, sans-serif",
+        "font-size": "12",
+        "font-weight": "bold",
+        fill: "#ff0000",
+      });
+      warn.textContent = "DIAGONAL!";
+      group.appendChild(warn);
+    }
+  }
+
   // --- Wall Drawing (Plan) ---
 
-  function drawWallsPlan(group, building, transform) {
-    for (const wall of building.walls.values()) {
-      const verts = Coord.wallVertices(wall);
-      const svgVerts = verts.map((v) => worldToSvg(v.x, v.y, transform));
-      const pts = svgVerts.map((v) => `${v.x},${v.y}`).join(" ");
+  function drawWallsPlan(group, building, transform, showThickness) {
+    if (showThickness === undefined) showThickness = true;
 
-      group.appendChild(svgEl("polygon", {
-        points: pts,
-        fill: COLORS.wallFill,
-        stroke: COLORS.wallStroke,
-        "stroke-width": 0.5,
-      }));
+    for (const wall of building.walls.values()) {
+      if (showThickness) {
+        // Step 5: 110mm wall thickness (filled rectangles)
+        const verts = Coord.wallVertices(wall);
+        const svgVerts = verts.map((v) => worldToSvg(v.x, v.y, transform));
+        const pts = svgVerts.map((v) => `${v.x},${v.y}`).join(" ");
+
+        group.appendChild(svgEl("polygon", {
+          points: pts,
+          fill: COLORS.wallFill,
+          stroke: COLORS.wallStroke,
+          "stroke-width": 0.5,
+        }));
+      } else {
+        // Step 4: Centrelines only (join the dots)
+        const sv1 = worldToSvg(wall.centreline.start.x, wall.centreline.start.y, transform);
+        const sv2 = worldToSvg(wall.centreline.end.x, wall.centreline.end.y, transform);
+
+        group.appendChild(svgEl("line", {
+          x1: sv1.x, y1: sv1.y,
+          x2: sv2.x, y2: sv2.y,
+          stroke: COLORS.wallStroke,
+          "stroke-width": WEIGHTS.wallCut,
+        }));
+      }
     }
   }
 
