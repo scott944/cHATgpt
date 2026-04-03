@@ -115,6 +115,16 @@ html, body {
   color: white;
 }
 
+#export-dxf-btn {
+  background: #1a5c2a;
+  border-color: #2a7a3a;
+}
+
+#export-dxf-btn:hover {
+  background: #2a8a4a;
+  border-color: #2a8a4a;
+}
+
 /* --- Workspace --- */
 
 .workspace {

@@ -135,6 +135,7 @@ DIM A1-A2 offset=800`;
     const errorBar = document.getElementById("error-bar");
     const viewSelect = document.getElementById("view-select");
     const exportBtn = document.getElementById("export-btn");
+    const exportDxfBtn = document.getElementById("export-dxf-btn");
     const clearBtn = document.getElementById("clear-btn");
     const exampleSelect = document.getElementById("example-select");
     const stepSlider = document.getElementById("step-slider");
@@ -174,6 +175,20 @@ DIM A1-A2 offset=800`;
     exportBtn.addEventListener("click", () => {
       Renderer.exportSVG(svg);
     });
+
+    // Export DXF (for ArchiCAD)
+    if (exportDxfBtn) {
+      exportDxfBtn.addEventListener("click", () => {
+        if (!building || building.walls.size === 0) {
+          errorBar.textContent = "Nothing to export — add walls first";
+          errorBar.className = "status-bar has-errors";
+          return;
+        }
+        DXF.downloadDXF(building, "drawing.dxf");
+        errorBar.textContent = "DXF exported — open in ArchiCAD to trace";
+        errorBar.className = "status-bar";
+      });
+    }
 
     // Clear input
     clearBtn.addEventListener("click", () => {
