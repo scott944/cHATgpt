@@ -117,21 +117,21 @@ const Coord = (() => {
       return resolveSlashRef(ref, grid, z, scale);
     }
 
-    // Try decimal format without slash: "G.4" paired with row context
-    // Standard format: "B2" or "B2.4" — letters=X, digits=Y
-    const match = ref.match(/^([A-Z]+)\.?(\d*)[\s]*(\d+\.?\d*)$/);
+    // Legacy format: "A1", "B10", "C2" — letters=X column, digits=Y row
+    // The regex splits at the letter/digit boundary: letters first, then all digits
+    const match = ref.match(/^([A-Z]+)(\d+\.?\d*)$/);
     if (!match) {
-      // Try decimal column: "G.4" with separate row
-      const decMatch = ref.match(/^([A-Z]+)(\.?\d*)$/);
+      // Try decimal column only: "G.4" with separate row context
+      const decMatch = ref.match(/^([A-Z]+\.\d+)$/);
       if (decMatch) {
-        const xVal = resolveAxisRef(decMatch[1] + (decMatch[2] || ""), grid.xLines, "x", scale);
-        if (xVal !== null) return point(xVal, 0, z || 0); // Row must come from context
+        const xVal = resolveAxisRef(decMatch[1], grid.xLines, "x", scale);
+        if (xVal !== null) return point(xVal, 0, z || 0);
       }
       return null;
     }
 
-    const xRef = match[1] + (match[2] ? "." + match[2] : "");
-    const yRef = match[3];
+    const xRef = match[1];
+    const yRef = match[2];
 
     const xVal = resolveAxisRef(xRef, grid.xLines, "x", scale);
     const yVal = resolveAxisRef(yRef, grid.yLines, "y", scale);

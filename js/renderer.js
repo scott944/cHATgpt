@@ -35,7 +35,7 @@ const Renderer = (() => {
 
   // --- Coordinate Transform ---
 
-  function createTransform(building, svgWidth, svgHeight, scale, viewType, margin) {
+  function createTransform(building, svgWidth, svgHeight, scale, viewType, margin, facing) {
     margin = margin || 80;
     const bbox = Coord.getBoundingBox(building);
 
@@ -57,14 +57,25 @@ const Renderer = (() => {
     const drawW = svgWidth - margin * 2;
     const drawH = svgHeight - margin * 2;
 
-    let worldW, worldH;
+    let worldW, worldH, originX, originY;
     if (viewType === "plan") {
       worldW = maxX - minX || 1;
       worldH = maxY - minY || 1;
+      originX = minX;
+      originY = minY;
     } else {
-      // Elevation: horizontal is X (or Y depending on facing), vertical is Z
-      worldW = maxX - minX || 1;
+      // Elevation: use correct axis based on facing direction
+      // N/S elevations look along Y axis → horizontal extent is X
+      // E/W elevations look along X axis → horizontal extent is Y
+      if (facing === "E" || facing === "W") {
+        worldW = maxY - minY || 1;
+        originX = minY;
+      } else {
+        worldW = maxX - minX || 1;
+        originX = minX;
+      }
       worldH = maxZ - minZ || 1;
+      originY = minZ;
     }
 
     // Auto-fit scale
@@ -73,8 +84,9 @@ const Renderer = (() => {
 
     return {
       viewType,
-      originX: viewType === "plan" ? minX : minX,
-      originY: viewType === "plan" ? minY : minZ,
+      facing: facing || null,
+      originX,
+      originY,
       worldW,
       worldH,
       scale: useScale,
@@ -189,7 +201,7 @@ const Renderer = (() => {
       fill: COLORS.background,
     }));
 
-    const transform = createTransform(building, svgWidth, svgHeight, "auto", "elevation");
+    const transform = createTransform(building, svgWidth, svgHeight, "auto", "elevation", undefined, facing);
 
     const wallGroup = svgGroup("walls");
     const openingGroup = svgGroup("openings");
