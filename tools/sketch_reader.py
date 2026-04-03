@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-sketch_reader.py - Sketch Reader for Absolute Drafting
-Reads coloured dots from scanned architectural hand sketches,
-maps them to grid coordinates, and generates DXF files.
+sketch_reader.py - Architectural Hand Sketch Reader
+====================================================
+For Scott Dellar, Absolute Drafting, NSW Australia.
+
+Reads scanned graph-paper sketches with coloured dot annotations,
+detects dot positions, maps to grid coordinates, and generates DXF
+files for ArchiCAD import.
 
 Scott's 6-Step Method:
-  PRE:  Grid from graph paper (A-L columns, 1-23 rows, 1m squares)
-  1:    Purple dots = perimeter wall corners
-  2:    Blue/teal dots = internal wall intersections
-  3:    Green dots = exterior elements (verandas/decks)
-  4:    Connect dots H/V only — diagonal = error
-  5:    Apply 110mm wall thickness (±55mm from centreline)
-  6:    Confirm dimensions with Scott before adjusting
+  PRE:  Grid from graph paper (A-L cols, 1-23 rows, 1m/square)
+  1. Purple/maroon dots = perimeter wall corners
+  2. Blue/teal dots    = internal wall intersections
+  3. Green dots        = exterior elements (verandas/decks)
+  4. Connect with H/V lines ONLY (diagonal = error)
+  5. Apply 110mm wall thickness (+/-55mm from centreline)
+  6. Confirm dimensions with Scott before nudging
 
-Usage:
+Usage (via Desktop Commander in Claude Desktop App):
   python sketch_reader.py --input scan.pdf --job "25056_Griffiths" --output ./DXF_Output
+
+Required: pymupdf, pillow, numpy, opencv-python, ezdxf, scipy
 """
 
 import argparse
@@ -22,481 +28,513 @@ import math
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# Lazy imports — fail gracefully with install instructions
-# ---------------------------------------------------------------------------
-
-def _check_imports():
-    missing = []
-    try:
-        import numpy  # noqa: F401
-    except ImportError:
-        missing.append("numpy")
-    try:
-        import cv2  # noqa: F401
-    except ImportError:
-        missing.append("opencv-python")
-    try:
-        from PIL import Image  # noqa: F401
-    except ImportError:
-        missing.append("pillow")
-    try:
-        import ezdxf  # noqa: F401
-    except ImportError:
-        missing.append("ezdxf")
-    # pymupdf is optional — only needed for PDF input
-    if missing:
-        print(f"ERROR: Missing libraries: {', '.join(missing)}")
-        print(f"Install with:  pip install {' '.join(missing)}")
-        sys.exit(1)
-
-_check_imports()
-
-import numpy as np
 import cv2
+import numpy as np
 from PIL import Image
-import ezdxf
 
-# Optional PDF support
 try:
     import fitz  # pymupdf
-    HAS_PYMUPDF = True
 except ImportError:
-    HAS_PYMUPDF = False
+    fitz = None
+
+try:
+    import ezdxf
+    from ezdxf.enums import TextEntityAlignment
+except ImportError:
+    ezdxf = None
 
 
-# ============================================================================
-# COLOUR DEFINITIONS (HSV ranges for dot detection)
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# OpenCV uses H: 0-179, S: 0-255, V: 0-255
+COLUMN_LABELS = list("ABCDEFGHIJKL")  # A-L
+ROW_MIN, ROW_MAX = 1, 23
+VALID_DECIMALS = {0.0, 0.2, 0.4, 0.6, 0.8}
+
+# HSV colour ranges (OpenCV uses H: 0-179, S: 0-255, V: 0-255)
 COLOUR_RANGES = {
-    "purple": {
-        "lower": np.array([120, 40, 40]),
-        "upper": np.array([170, 255, 255]),
-        "label": "PURPLE",
-        "category": "perimeter",
-    },
-    "blue": {
-        "lower": np.array([80, 40, 40]),
-        "upper": np.array([120, 255, 255]),
-        "label": "BLUE",
-        "category": "internal",
-    },
-    "green": {
-        "lower": np.array([35, 40, 40]),
-        "upper": np.array([80, 255, 255]),
-        "label": "GREEN",
-        "category": "external",
-    },
+    "purple": {"lower": np.array([120, 40, 40]), "upper": np.array([170, 255, 255])},
+    "blue":   {"lower": np.array([80, 40, 40]),  "upper": np.array([120, 255, 255])},
+    "green":  {"lower": np.array([35, 40, 40]),  "upper": np.array([80, 255, 255])},
+}
+
+LAYER_CONFIG = {
+    "purple": {"layer": "WALLS-PERIMETER", "color": 7},
+    "blue":   {"layer": "WALLS-INTERNAL",  "color": 8},
+    "green":  {"layer": "WALLS-EXTERIOR",  "color": 3},
+}
+
+DXF_LAYERS = {
+    "WALLS-PERIMETER": {"color": 7, "linetype": "Continuous"},
+    "WALLS-INTERNAL":  {"color": 8, "linetype": "Continuous"},
+    "WALLS-EXTERIOR":  {"color": 3, "linetype": "Continuous"},
+    "WALLS-CENTRE":    {"color": 8, "linetype": "DASHED"},
+    "GRID":            {"color": 4, "linetype": "Continuous"},
+    "DOTS":            {"color": 2, "linetype": "Continuous"},
 }
 
 
-# ============================================================================
-# 1. IMAGE LOADING
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
-def load_image(input_path: str) -> np.ndarray:
-    """Load a PDF or image file, return as BGR numpy array."""
+@dataclass
+class GridCoord:
+    """A grid coordinate in slash notation, e.g. G.6/16.4"""
+    col_label: str       # e.g. "G"
+    col_frac: float      # e.g. 0.6
+    row_int: int         # e.g. 16
+    row_frac: float      # e.g. 0.4
+
+    @property
+    def col_index(self) -> float:
+        return COLUMN_LABELS.index(self.col_label) + self.col_frac
+
+    @property
+    def row_value(self) -> float:
+        return self.row_int + self.row_frac
+
+    @property
+    def slash(self) -> str:
+        col = self.col_label
+        if self.col_frac > 0:
+            col += f".{int(self.col_frac * 10)}"
+        row = str(self.row_int)
+        if self.row_frac > 0:
+            row += f".{int(self.row_frac * 10)}"
+        return f"{col}/{row}"
+
+    def to_mm(self, scale: float = 1000.0) -> Tuple[float, float]:
+        x = self.col_index * scale
+        y = self.row_value * scale
+        return (x, y)
+
+    def __repr__(self):
+        return f"GridCoord({self.slash})"
+
+
+@dataclass
+class DetectedDot:
+    """A detected coloured dot with pixel and grid positions."""
+    px_x: float
+    px_y: float
+    area: float
+    colour: str
+    coord: Optional[GridCoord] = None
+
+
+@dataclass
+class Wall:
+    """A wall segment between two grid coordinates."""
+    start: GridCoord
+    end: GridCoord
+    thickness: float
+    category: str  # purple, blue, green
+
+    @property
+    def is_horizontal(self) -> bool:
+        return abs(self.start.row_value - self.end.row_value) < 0.05
+
+    @property
+    def is_vertical(self) -> bool:
+        return abs(self.start.col_index - self.end.col_index) < 0.05
+
+    @property
+    def is_valid(self) -> bool:
+        return self.is_horizontal or self.is_vertical
+
+
+# ---------------------------------------------------------------------------
+# 1. Image Loading
+# ---------------------------------------------------------------------------
+
+def load_image(input_path: str, dpi: int = 300) -> np.ndarray:
+    """Load PDF or image file, return as BGR numpy array."""
     path = Path(input_path)
     if not path.exists():
-        print(f"ERROR: File not found: {input_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Input file not found: {input_path}")
 
     ext = path.suffix.lower()
-
     if ext == ".pdf":
-        if not HAS_PYMUPDF:
-            print("ERROR: PDF support requires pymupdf. Install: pip install pymupdf")
-            sys.exit(1)
+        if fitz is None:
+            raise ImportError("pymupdf (fitz) is required for PDF input. Install: pip install pymupdf")
+        print(f"  Loading PDF: {path.name} at {dpi} DPI...")
         doc = fitz.open(str(path))
         page = doc[0]
-        # Render at 300 DPI
-        mat = fitz.Matrix(300 / 72, 300 / 72)
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
         pix = page.get_pixmap(matrix=mat)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, pix.n
-        )
-        if pix.n == 4:  # RGBA
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-        elif pix.n == 3:  # RGB
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
         doc.close()
-        print(f"Loaded PDF: {pix.width}x{pix.height} @ 300 DPI")
-        return img
-
+        if img_array.shape[2] == 4:  # RGBA
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+        elif img_array.shape[2] == 3:  # RGB
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        print(f"  Image size: {img_array.shape[1]}x{img_array.shape[0]} px")
+        return img_array
     elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
-        img = cv2.imread(str(path))
-        if img is None:
-            print(f"ERROR: Could not read image: {input_path}")
-            sys.exit(1)
-        h, w = img.shape[:2]
-        print(f"Loaded image: {w}x{h}")
-        return img
-
+        print(f"  Loading image: {path.name}...")
+        pil_img = Image.open(str(path)).convert("RGB")
+        img_array = np.array(pil_img)
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        print(f"  Image size: {img_array.shape[1]}x{img_array.shape[0]} px")
+        return img_array
     else:
-        print(f"ERROR: Unsupported file type: {ext}")
-        sys.exit(1)
+        raise ValueError(f"Unsupported file format: {ext}")
 
 
-# ============================================================================
-# 2. GRID DETECTION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# 2. Grid Detection
+# ---------------------------------------------------------------------------
 
-def detect_grid(img: np.ndarray, scale: int = 1000):
+def detect_grid(img: np.ndarray, num_cols: int = 12, num_rows: int = 23
+                ) -> Tuple[Dict[str, float], Dict[int, float], float]:
     """
-    Detect the major grid lines on graph paper.
-    Returns (x_labels, y_labels, px_per_mm) where labels map
-    grid label -> pixel position.
+    Detect major grid lines on graph paper.
 
-    Falls back to evenly-spaced grid if detection fails.
+    Returns:
+        col_positions: dict mapping column label -> pixel X position
+        row_positions: dict mapping row number -> pixel Y position
+        px_per_mm: pixels per millimetre
     """
-    h, w = img.shape[:2]
+    print("  Detecting grid lines...")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
 
-    # Detect strong lines using adaptive threshold
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Try to detect grid lines via edge detection
+    # Apply adaptive threshold to find dark lines
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, binary = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY_INV)
 
-    # Find horizontal and vertical line profiles
-    h_proj = np.sum(thresh, axis=1)  # horizontal projection
-    v_proj = np.sum(thresh, axis=0)  # vertical projection
+    # Project onto axes to find line positions
+    h_proj = np.sum(binary, axis=1).astype(float)
+    v_proj = np.sum(binary, axis=0).astype(float)
 
-    # Find peaks in projections (major grid lines)
-    h_threshold = np.percentile(h_proj, 85)
-    v_threshold = np.percentile(v_proj, 85)
+    # Find peaks in projections (grid lines)
+    h_peaks = _find_grid_peaks(h_proj, expected_count=num_rows + 1)
+    v_peaks = _find_grid_peaks(v_proj, expected_count=num_cols + 1)
 
-    h_lines = _find_grid_lines(h_proj, h_threshold, min_spacing=20)
-    v_lines = _find_grid_lines(v_proj, v_threshold, min_spacing=20)
+    if len(h_peaks) >= 2 and len(v_peaks) >= 2:
+        # Use detected lines
+        print(f"  Found {len(v_peaks)} vertical, {len(h_peaks)} horizontal grid lines")
+    else:
+        # Fallback: divide image evenly
+        print("  Grid detection weak, using uniform spacing fallback")
+        margin_x = int(w * 0.05)
+        margin_y = int(h * 0.05)
+        v_peaks = np.linspace(margin_x, w - margin_x, num_cols + 1).astype(int)
+        h_peaks = np.linspace(margin_y, h - margin_y, num_rows + 1).astype(int)
 
-    if len(v_lines) < 3 or len(h_lines) < 3:
-        print("WARNING: Grid detection weak — using fallback uniform grid")
-        return _fallback_grid(w, h, scale)
+    # Map to labels
+    col_positions = {}
+    for i, label in enumerate(COLUMN_LABELS[:num_cols]):
+        if i < len(v_peaks):
+            col_positions[label] = float(v_peaks[i])
 
-    # Compute average grid spacing
-    v_spacings = [v_lines[i+1] - v_lines[i] for i in range(len(v_lines)-1)]
-    h_spacings = [h_lines[i+1] - h_lines[i] for i in range(len(h_lines)-1)]
+    row_positions = {}
+    for i in range(num_rows):
+        row_num = i + 1
+        if i < len(h_peaks):
+            row_positions[row_num] = float(h_peaks[i])
 
-    avg_v_spacing = np.median(v_spacings) if v_spacings else w / 12
-    avg_h_spacing = np.median(h_spacings) if h_spacings else h / 23
+    # Compute scale
+    if len(v_peaks) >= 2:
+        avg_col_spacing = np.mean(np.diff(sorted(v_peaks)))
+    else:
+        avg_col_spacing = w / num_cols
 
-    # px_per_mm: one grid square = scale mm
-    px_per_mm = avg_v_spacing / scale
+    px_per_mm = avg_col_spacing / 1000.0  # 1 grid square = 1000mm
+    print(f"  Scale: {px_per_mm:.4f} px/mm ({avg_col_spacing:.1f} px per grid square)")
 
-    # Assign labels: A, B, C... for columns, 1, 2, 3... for rows
-    x_labels = {}
-    for i, px in enumerate(v_lines):
-        label = chr(65 + i) if i < 26 else f"X{i}"  # A-Z
-        x_labels[label] = px
-
-    y_labels = {}
-    for i, px in enumerate(h_lines):
-        label = str(i + 1)
-        y_labels[label] = px
-
-    print(f"Grid detected: {len(x_labels)} columns, {len(y_labels)} rows")
-    print(f"  px/mm = {px_per_mm:.3f}, grid spacing = {avg_v_spacing:.0f}px")
-
-    return x_labels, y_labels, px_per_mm
-
-
-def _find_grid_lines(projection, threshold, min_spacing=20):
-    """Find peaks in a projection profile above threshold."""
-    above = projection > threshold
-    lines = []
-    in_peak = False
-    peak_start = 0
-
-    for i, val in enumerate(above):
-        if val and not in_peak:
-            peak_start = i
-            in_peak = True
-        elif not val and in_peak:
-            peak_centre = (peak_start + i) // 2
-            if not lines or (peak_centre - lines[-1]) > min_spacing:
-                lines.append(peak_centre)
-            in_peak = False
-
-    return lines
+    return col_positions, row_positions, px_per_mm
 
 
-def _fallback_grid(w, h, scale):
-    """Create a uniform grid when detection fails."""
-    margin_x = w * 0.08
-    margin_y = h * 0.08
-    usable_w = w - 2 * margin_x
-    usable_h = h - 2 * margin_y
+def _find_grid_peaks(projection: np.ndarray, expected_count: int,
+                     min_distance: int = 20) -> np.ndarray:
+    """Find peaks in a projection that likely correspond to grid lines."""
+    try:
+        from scipy.signal import find_peaks as scipy_find_peaks
+        # Normalize
+        proj = projection / (projection.max() + 1e-8)
+        # Find peaks with minimum distance
+        min_dist = max(min_distance, len(projection) // (expected_count * 3))
+        peaks, properties = scipy_find_peaks(proj, distance=min_dist, height=0.15)
 
-    # Assume A4 portrait with ~12 columns and ~23 rows
-    n_cols = 12
-    n_rows = 23
-    col_spacing = usable_w / n_cols
-    row_spacing = usable_h / n_rows
+        if len(peaks) > expected_count + 2:
+            # Too many - keep the strongest
+            heights = properties["peak_heights"]
+            top_idx = np.argsort(heights)[-expected_count:]
+            peaks = np.sort(peaks[top_idx])
 
-    x_labels = {}
-    for i in range(n_cols):
-        label = chr(65 + i)
-        x_labels[label] = int(margin_x + i * col_spacing)
-
-    y_labels = {}
-    for i in range(n_rows):
-        label = str(i + 1)
-        y_labels[label] = int(margin_y + i * row_spacing)
-
-    px_per_mm = col_spacing / scale
-    print(f"Fallback grid: {n_cols} columns (A-L), {n_rows} rows (1-23)")
-    return x_labels, y_labels, px_per_mm
+        return peaks
+    except ImportError:
+        # Fallback without scipy
+        return np.array([])
 
 
-# ============================================================================
-# 3. DOT DETECTION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# 3. Dot Detection (OpenCV)
+# ---------------------------------------------------------------------------
 
-def detect_dots(img, x_labels, y_labels, px_per_mm, scale, min_area=20, debug=False, debug_dir=None):
+def snap_to_grid(value: float) -> float:
+    """Snap a float value to the nearest 0.2 increment."""
+    snapped = round(value * 5) / 5  # nearest 0.2
+    frac = snapped - int(snapped)
+    # Ensure fraction is in valid set
+    frac_rounded = round(frac, 1)
+    if frac_rounded not in {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}:
+        # Find nearest valid
+        valid = [0.0, 0.2, 0.4, 0.6, 0.8]
+        frac_rounded = min(valid, key=lambda v: abs(v - frac))
+    if frac_rounded >= 1.0:
+        return float(int(snapped) + 1)
+    return float(int(snapped)) + frac_rounded
+
+
+def pixel_to_grid(px_x: float, px_y: float,
+                  col_positions: Dict[str, float],
+                  row_positions: Dict[int, float],
+                  scale: float = 1000.0) -> Optional[GridCoord]:
+    """Convert pixel coordinates to grid coordinates."""
+    sorted_cols = sorted(col_positions.items(), key=lambda x: x[1])
+    sorted_rows = sorted(row_positions.items(), key=lambda x: x[1])
+
+    if len(sorted_cols) < 2 or len(sorted_rows) < 2:
+        return None
+
+    # Find column position
+    col_idx = _interpolate_position(px_x, sorted_cols)
+    if col_idx is None:
+        return None
+
+    # Find row position
+    row_val = _interpolate_position_rows(px_y, sorted_rows)
+    if row_val is None:
+        return None
+
+    # Snap to 200mm increments
+    col_idx = snap_to_grid(col_idx)
+    row_val = snap_to_grid(row_val)
+
+    # Extract label and fraction
+    col_int = int(col_idx)
+    col_frac = round(col_idx - col_int, 1)
+    if col_int < 0 or col_int >= len(COLUMN_LABELS):
+        return None
+    col_label = COLUMN_LABELS[col_int]
+
+    row_int = int(row_val)
+    row_frac = round(row_val - row_int, 1)
+
+    if col_frac >= 1.0:
+        col_frac = 0.0
+        col_int += 1
+        if col_int >= len(COLUMN_LABELS):
+            return None
+        col_label = COLUMN_LABELS[col_int]
+
+    if row_frac >= 1.0:
+        row_frac = 0.0
+        row_int += 1
+
+    return GridCoord(col_label=col_label, col_frac=col_frac,
+                     row_int=row_int, row_frac=row_frac)
+
+
+def _interpolate_position(px: float, sorted_items: list) -> Optional[float]:
+    """Interpolate pixel position to grid index for columns."""
+    labels, positions = zip(*sorted_items)
+    positions = list(positions)
+
+    if px <= positions[0]:
+        return 0.0
+    if px >= positions[-1]:
+        return float(len(positions) - 1)
+
+    for i in range(len(positions) - 1):
+        if positions[i] <= px <= positions[i + 1]:
+            frac = (px - positions[i]) / (positions[i + 1] - positions[i])
+            idx_i = COLUMN_LABELS.index(labels[i])
+            idx_next = COLUMN_LABELS.index(labels[i + 1])
+            return idx_i + frac * (idx_next - idx_i)
+    return None
+
+
+def _interpolate_position_rows(px: float, sorted_items: list) -> Optional[float]:
+    """Interpolate pixel position to grid value for rows."""
+    row_nums, positions = zip(*sorted_items)
+    row_nums = list(row_nums)
+    positions = list(positions)
+
+    if px <= positions[0]:
+        return float(row_nums[0])
+    if px >= positions[-1]:
+        return float(row_nums[-1])
+
+    for i in range(len(positions) - 1):
+        if positions[i] <= px <= positions[i + 1]:
+            frac = (px - positions[i]) / (positions[i + 1] - positions[i])
+            return row_nums[i] + frac * (row_nums[i + 1] - row_nums[i])
+    return None
+
+
+def detect_dots(img: np.ndarray,
+                col_positions: Dict[str, float],
+                row_positions: Dict[int, float],
+                min_area: int = 20,
+                debug: bool = False,
+                debug_dir: Optional[str] = None
+                ) -> Dict[str, List[DetectedDot]]:
     """
-    Detect coloured dots and map to grid coordinates.
-    Returns dict: {"purple": [...], "blue": [...], "green": [...]}
+    Detect coloured dots in the image using HSV colour masking.
+
+    Returns dict with keys 'purple', 'blue', 'green',
+    each containing a list of DetectedDot objects.
     """
+    print("  Detecting coloured dots...")
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     results = {}
 
-    for colour_name, colour_def in COLOUR_RANGES.items():
-        mask = cv2.inRange(hsv, colour_def["lower"], colour_def["upper"])
+    for colour_name, ranges in COLOUR_RANGES.items():
+        mask = cv2.inRange(hsv, ranges["lower"], ranges["upper"])
 
         # Morphological cleanup
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         dots = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
+        for contour in contours:
+            area = cv2.contourArea(contour)
             if area < min_area:
                 continue
-
-            # Compute centroid
-            M = cv2.moments(cnt)
+            M = cv2.moments(contour)
             if M["m00"] == 0:
                 continue
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
 
-            # Map pixel to grid coordinate
-            coord = pixel_to_grid_ref(cx, cy, x_labels, y_labels, scale)
-            if coord:
-                dots.append({"px": (cx, cy), "ref": coord, "area": area})
+            coord = pixel_to_grid(cx, cy, col_positions, row_positions)
+            dots.append(DetectedDot(px_x=cx, px_y=cy, area=area,
+                                    colour=colour_name, coord=coord))
 
-        # Sort by coordinate for consistent output
-        dots.sort(key=lambda d: d["ref"])
+        # Sort dots by coordinate for consistent output
+        dots.sort(key=lambda d: (d.coord.col_index if d.coord else 999,
+                                  d.coord.row_value if d.coord else 999))
         results[colour_name] = dots
+        print(f"    {colour_name}: {len(dots)} dots detected")
 
-        label = colour_def["label"]
-        print(f"  {label}: Found {len(dots)} dots")
-
-        # Debug output
         if debug and debug_dir:
-            debug_img = img.copy()
-            cv2.drawContours(debug_img, contours, -1, (0, 0, 255), 2)
-            for dot in dots:
-                cv2.circle(debug_img, dot["px"], 8, (0, 255, 0), 2)
-                cv2.putText(debug_img, dot["ref"], (dot["px"][0]+10, dot["px"][1]-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-            cv2.imwrite(str(Path(debug_dir) / f"debug_{colour_name}.png"), debug_img)
+            debug_path = os.path.join(debug_dir, f"debug_mask_{colour_name}.png")
+            cv2.imwrite(debug_path, mask)
+            print(f"    Debug mask saved: {debug_path}")
 
     return results
 
 
-def pixel_to_grid_ref(px_x, px_y, x_labels, y_labels, scale):
-    """
-    Convert pixel coordinates to grid reference string.
-    Uses Scott's decimal notation: G.4 = 400mm past column G.
-    Snaps to nearest 200mm increment.
-    """
-    col_ref = _pixel_to_axis_ref(px_x, x_labels, scale, use_letters=True)
-    row_ref = _pixel_to_axis_ref(px_y, y_labels, scale, use_letters=False)
+# ---------------------------------------------------------------------------
+# 4. Wall Generation
+# ---------------------------------------------------------------------------
 
-    if col_ref is None or row_ref is None:
-        return None
-
-    return f"{col_ref}/{row_ref}"
-
-
-def _pixel_to_axis_ref(px, labels, scale, use_letters=True):
-    """
-    Map a pixel position to the nearest grid reference with decimal.
-    Snaps to 200mm (0.2 grid unit) increments.
-    """
-    sorted_labels = sorted(labels.items(), key=lambda x: x[1])
-    if not sorted_labels:
-        return None
-
-    # Find which grid square the pixel falls in
-    for i in range(len(sorted_labels) - 1):
-        label, pos = sorted_labels[i]
-        next_label, next_pos = sorted_labels[i + 1]
-
-        if pos <= px <= next_pos:
-            # Fraction within this grid square
-            frac = (px - pos) / (next_pos - pos) if (next_pos - pos) > 0 else 0
-
-            # Snap to nearest 0.2
-            snapped = round(frac * 5) / 5  # 0, 0.2, 0.4, 0.6, 0.8, 1.0
-
-            if snapped >= 1.0:
-                return next_label
-            elif snapped <= 0.0:
-                return label
-            else:
-                # Format decimal: G.4 = column G + 0.4
-                dec_str = str(int(snapped * 10))
-                return f"{label}.{dec_str}"
-
-    # Before first or after last grid line
-    first_label, first_pos = sorted_labels[0]
-    last_label, last_pos = sorted_labels[-1]
-
-    if px < first_pos:
-        return first_label
-    if px > last_pos:
-        return last_label
-
-    return None
-
-
-# ============================================================================
-# 4. WALL GENERATION
-# ============================================================================
-
-def generate_walls(dot_results, x_labels, y_labels, scale, wall_thickness):
+def generate_walls(dots: Dict[str, List[DetectedDot]],
+                   wall_thickness: float = 110.0) -> List[Wall]:
     """
     Connect dots that share a column or row to form walls.
-    All walls must be horizontal or vertical — diagonals are errors.
+    Only horizontal and vertical walls are allowed - diagonal = error.
     """
+    print("  Generating walls...")
     walls = []
     warnings = []
 
-    for colour_name, dots in dot_results.items():
-        category = COLOUR_RANGES[colour_name]["category"]
-        thickness = wall_thickness if category == "perimeter" else 90
+    for colour_name, dot_list in dots.items():
+        coords = [d.coord for d in dot_list if d.coord is not None]
+        if len(coords) < 2:
+            continue
 
-        coords = []
-        for dot in dots:
-            mm = ref_to_mm(dot["ref"], x_labels, y_labels, scale)
-            if mm:
-                coords.append({"ref": dot["ref"], "mm": mm})
+        thickness = wall_thickness
 
-        # Connect dots that share approximately the same X or Y
-        tolerance = scale * 0.15  # 15% of a grid square
-
+        # Find pairs that share column or row
+        connected = set()
         for i in range(len(coords)):
             for j in range(i + 1, len(coords)):
-                p1 = coords[i]["mm"]
-                p2 = coords[j]["mm"]
-                dx = abs(p1[0] - p2[0])
-                dy = abs(p1[1] - p2[1])
+                c1, c2 = coords[i], coords[j]
 
-                is_horizontal = dy < tolerance and dx > tolerance
-                is_vertical = dx < tolerance and dy > tolerance
+                is_h = abs(c1.row_value - c2.row_value) < 0.05
+                is_v = abs(c1.col_index - c2.col_index) < 0.05
 
-                if is_horizontal or is_vertical:
-                    # Check it's a direct neighbour (no other dot between them on same axis)
-                    if _is_direct_neighbour(coords, i, j, is_horizontal):
-                        walls.append({
-                            "start": p1,
-                            "end": p2,
-                            "thickness": thickness,
-                            "category": category,
-                            "ref_start": coords[i]["ref"],
-                            "ref_end": coords[j]["ref"],
-                        })
-                elif dx > tolerance and dy > tolerance:
-                    # This would be a diagonal — skip silently (not all dots connect)
-                    pass
+                if is_h or is_v:
+                    # Check no other dot lies between them on the same line
+                    between = False
+                    for k in range(len(coords)):
+                        if k == i or k == j:
+                            continue
+                        ck = coords[k]
+                        if is_h and abs(ck.row_value - c1.row_value) < 0.05:
+                            if min(c1.col_index, c2.col_index) < ck.col_index < max(c1.col_index, c2.col_index):
+                                between = True
+                                break
+                        if is_v and abs(ck.col_index - c1.col_index) < 0.05:
+                            if min(c1.row_value, c2.row_value) < ck.row_value < max(c1.row_value, c2.row_value):
+                                between = True
+                                break
 
-    print(f"Generated {len(walls)} walls ({len(warnings)} warnings)")
-    return walls, warnings
+                    if not between:
+                        wall = Wall(start=c1, end=c2, thickness=thickness,
+                                    category=colour_name)
+                        walls.append(wall)
+                        connected.add(i)
+                        connected.add(j)
 
+        unconnected = [coords[i].slash for i in range(len(coords))
+                       if i not in connected]
+        if unconnected:
+            warnings.append(f"    WARNING [{colour_name}]: unconnected dots: {', '.join(unconnected)}")
 
-def _is_direct_neighbour(coords, i, j, is_horizontal):
-    """Check that no other dot lies between i and j on the same axis."""
-    p1 = coords[i]["mm"]
-    p2 = coords[j]["mm"]
+    # Validate all walls
+    valid_walls = []
+    for wall in walls:
+        if wall.is_valid:
+            valid_walls.append(wall)
+        else:
+            dx = abs(wall.start.col_index - wall.end.col_index)
+            dy = abs(wall.start.row_value - wall.end.row_value)
+            print(f"    ERROR: Diagonal wall rejected: {wall.start.slash} -> {wall.end.slash} "
+                  f"(dx={dx:.1f}, dy={dy:.1f})")
 
-    if is_horizontal:
-        # Same row — check no dot between them in X
-        min_x = min(p1[0], p2[0])
-        max_x = max(p1[0], p2[0])
-        y_avg = (p1[1] + p2[1]) / 2
-        tolerance = abs(p2[1] - p1[1]) + 200
+    for w in warnings:
+        print(w)
 
-        for k in range(len(coords)):
-            if k == i or k == j:
-                continue
-            pk = coords[k]["mm"]
-            if abs(pk[1] - y_avg) < tolerance and min_x < pk[0] < max_x:
-                return False
-    else:
-        # Same column — check no dot between them in Y
-        min_y = min(p1[1], p2[1])
-        max_y = max(p1[1], p2[1])
-        x_avg = (p1[0] + p2[0]) / 2
-        tolerance = abs(p2[0] - p1[0]) + 200
+    h_count = sum(1 for w in valid_walls if w.is_horizontal)
+    v_count = sum(1 for w in valid_walls if w.is_vertical)
+    print(f"  Walls generated: {len(valid_walls)} ({h_count} horizontal, {v_count} vertical)")
+    if len(walls) != len(valid_walls):
+        print(f"  Diagonal walls rejected: {len(walls) - len(valid_walls)}")
 
-        for k in range(len(coords)):
-            if k == i or k == j:
-                continue
-            pk = coords[k]["mm"]
-            if abs(pk[0] - x_avg) < tolerance and min_y < pk[1] < max_y:
-                return False
-
-    return True
+    return valid_walls
 
 
-def ref_to_mm(ref, x_labels, y_labels, scale):
-    """Convert 'G.6/16.4' to (x_mm, y_mm)."""
-    parts = ref.split("/")
-    if len(parts) != 2:
-        return None
+# ---------------------------------------------------------------------------
+# 5. DXF Output
+# ---------------------------------------------------------------------------
 
-    x_mm = _axis_ref_to_mm(parts[0].strip(), x_labels, scale)
-    y_mm = _axis_ref_to_mm(parts[1].strip(), y_labels, scale)
+def create_dxf(walls: List[Wall],
+               dots: Dict[str, List[DetectedDot]],
+               col_positions: Dict[str, float],
+               row_positions: Dict[int, float],
+               scale: float = 1000.0,
+               output_path: str = "output.dxf") -> None:
+    """Generate a DXF file with walls, grid, and dot markers."""
+    if ezdxf is None:
+        raise ImportError("ezdxf is required for DXF output. Install: pip install ezdxf")
 
-    if x_mm is None or y_mm is None:
-        return None
-    return (x_mm, y_mm)
-
-
-def _axis_ref_to_mm(ref, labels, scale):
-    """Convert 'G.6' to mm: label position + decimal * scale."""
-    match = re.match(r'^([A-Za-z0-9]+)\.(\d+)$', ref)
-    if match:
-        base_label = match.group(1)
-        decimal = float(f"0.{match.group(2)}")
-        sorted_labels = sorted(labels.items(), key=lambda x: x[1])
-        # Find index of base label
-        for idx, (lbl, _) in enumerate(sorted_labels):
-            if lbl == base_label:
-                return idx * scale + decimal * scale
-        return None
-
-    # Whole ref: "G" or "2"
-    sorted_labels = sorted(labels.items(), key=lambda x: x[1])
-    for idx, (lbl, _) in enumerate(sorted_labels):
-        if lbl == ref:
-            return idx * scale
-    return None
-
-
-# ============================================================================
-# 5. DXF OUTPUT
-# ============================================================================
-
-def write_dxf(walls, dot_results, x_labels, y_labels, scale, output_path):
-    """Generate DXF file with walls, grid, and dot markers."""
+    print(f"  Creating DXF: {output_path}")
     doc = ezdxf.new("R2010")
     msp = doc.modelspace()
 
@@ -504,202 +542,360 @@ def write_dxf(walls, dot_results, x_labels, y_labels, scale, output_path):
     doc.header["$INSUNITS"] = 4  # mm
     doc.header["$MEASUREMENT"] = 1  # metric
 
+    # Add DASHED linetype
+    if "DASHED" not in doc.linetypes:
+        doc.linetypes.add("DASHED", pattern="A,5.0,-5.0",
+                          description="Dashed line __ __ __")
+
     # Create layers
-    doc.layers.add("WALLS-PERIMETER", color=7, lineweight=50)
-    doc.layers.add("WALLS-INTERNAL", color=8, lineweight=35)
-    doc.layers.add("WALLS-EXTERIOR", color=3, lineweight=35)
-    doc.layers.add("WALLS-CENTRE", color=8, lineweight=18)
-    doc.layers.add("GRID", color=4)
-    doc.layers.add("DOTS", color=2)
+    for layer_name, config in DXF_LAYERS.items():
+        doc.layers.add(layer_name,
+                       color=config["color"],
+                       linetype=config.get("linetype", "Continuous"))
 
-    # Add dashed linetype for centrelines
-    doc.linetypes.add("DASHED", pattern=[0.5, 0.25, -0.25])
+    # --- Grid lines ---
+    _draw_grid(msp, scale)
 
-    # --- Draw grid ---
-    sorted_x = sorted(x_labels.items(), key=lambda x: x[1])
-    sorted_y = sorted(y_labels.items(), key=lambda x: x[1])
+    # --- Dot markers ---
+    _draw_dots(msp, dots, scale)
 
-    n_cols = len(sorted_x)
-    n_rows = len(sorted_y)
-    max_x = (n_cols - 1) * scale
-    max_y = (n_rows - 1) * scale
-    ext = 500  # extend grid past building
+    # --- Walls ---
+    _draw_walls(msp, walls, scale)
 
-    for i, (label, _) in enumerate(sorted_x):
+    doc.saveas(output_path)
+    print(f"  DXF saved: {output_path}")
+
+
+def _draw_grid(msp, scale: float) -> None:
+    """Draw grid lines and labels on the GRID layer."""
+    max_col = len(COLUMN_LABELS) - 1
+    max_row = ROW_MAX
+
+    for i, label in enumerate(COLUMN_LABELS):
         x = i * scale
-        msp.add_line((x, -ext), (x, max_y + ext), dxfattribs={"layer": "GRID"})
-        msp.add_text(label, height=300, dxfattribs={"layer": "GRID"}).set_placement(
-            (x, max_y + ext + 200), align=ezdxf.enums.TextEntityAlignment.CENTER
-        )
+        msp.add_line((x, ROW_MIN * scale), (x, max_row * scale),
+                      dxfattribs={"layer": "GRID"})
+        msp.add_text(label, height=scale * 0.3,
+                     dxfattribs={"layer": "GRID"}).set_placement(
+                         (x, (ROW_MIN - 0.8) * scale),
+                         align=TextEntityAlignment.CENTER)
 
-    for i, (label, _) in enumerate(sorted_y):
-        y = i * scale
-        msp.add_line((-ext, y), (max_x + ext, y), dxfattribs={"layer": "GRID"})
-        msp.add_text(label, height=300, dxfattribs={"layer": "GRID"}).set_placement(
-            (-ext - 400, y), align=ezdxf.enums.TextEntityAlignment.CENTER
-        )
+    for row in range(ROW_MIN, max_row + 1):
+        y = row * scale
+        msp.add_line((0, y), (max_col * scale, y),
+                      dxfattribs={"layer": "GRID"})
+        msp.add_text(str(row), height=scale * 0.3,
+                     dxfattribs={"layer": "GRID"}).set_placement(
+                         (-0.6 * scale, y),
+                         align=TextEntityAlignment.CENTER)
 
-    # --- Draw dots ---
-    for colour_name, dots in dot_results.items():
-        for dot in dots:
-            mm = ref_to_mm(dot["ref"], x_labels, y_labels, scale)
-            if not mm:
+
+def _draw_dots(msp, dots: Dict[str, List[DetectedDot]], scale: float) -> None:
+    """Draw dot markers as circles with labels on the DOTS layer."""
+    radius = scale * 0.15  # 150mm radius marker
+
+    for colour_name, dot_list in dots.items():
+        for dot in dot_list:
+            if dot.coord is None:
                 continue
-            msp.add_circle(mm, radius=50, dxfattribs={"layer": "DOTS"})
-            msp.add_text(dot["ref"], height=150, dxfattribs={"layer": "DOTS"}).set_placement(
-                (mm[0] + 80, mm[1] + 80)
-            )
+            x, y = dot.coord.to_mm(scale)
+            msp.add_circle((x, y), radius,
+                           dxfattribs={"layer": "DOTS"})
+            msp.add_text(dot.coord.slash, height=scale * 0.15,
+                         dxfattribs={"layer": "DOTS"}).set_placement(
+                             (x + radius * 1.2, y),
+                             align=TextEntityAlignment.LEFT)
 
-    # --- Draw walls ---
-    layer_map = {
-        "perimeter": "WALLS-PERIMETER",
-        "internal": "WALLS-INTERNAL",
-        "external": "WALLS-EXTERIOR",
-    }
 
+def _draw_walls(msp, walls: List[Wall], scale: float) -> None:
+    """Draw wall centrelines and thickness rectangles."""
     for wall in walls:
-        s = wall["start"]
-        e = wall["end"]
-        layer = layer_map.get(wall["category"], "WALLS-PERIMETER")
-        t = wall["thickness"]
+        layer_name = LAYER_CONFIG[wall.category]["layer"]
+        sx, sy = wall.start.to_mm(scale)
+        ex, ey = wall.end.to_mm(scale)
+        half_t = wall.thickness / 2.0
 
         # Centreline (dashed)
-        msp.add_line(s, e, dxfattribs={
-            "layer": "WALLS-CENTRE",
-            "linetype": "DASHED",
-        })
+        msp.add_line((sx, sy), (ex, ey),
+                     dxfattribs={"layer": "WALLS-CENTRE"})
 
-        # Wall thickness rectangle
-        verts = _wall_vertices(s, e, t)
-        if verts:
-            for k in range(4):
-                v1 = verts[k]
-                v2 = verts[(k + 1) % 4]
-                msp.add_line(v1, v2, dxfattribs={"layer": layer})
-
-    doc.saveas(str(output_path))
-    print(f"DXF saved: {output_path}")
-
-
-def _wall_vertices(start, end, thickness):
-    """Compute 4 corner vertices of a wall with given thickness."""
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = math.sqrt(dx * dx + dy * dy)
-    if length == 0:
-        return []
-
-    # Perpendicular offset
-    half_t = thickness / 2
-    px = -dy / length * half_t
-    py = dx / length * half_t
-
-    return [
-        (start[0] + px, start[1] + py),
-        (end[0] + px, end[1] + py),
-        (end[0] - px, end[1] - py),
-        (start[0] - px, start[1] - py),
-    ]
+        # Wall rectangle (4 lines offset by +/- half thickness)
+        if wall.is_horizontal:
+            # Offset in Y
+            msp.add_line((sx, sy - half_t), (ex, ey - half_t),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((sx, sy + half_t), (ex, ey + half_t),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((sx, sy - half_t), (sx, sy + half_t),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((ex, ey - half_t), (ex, ey + half_t),
+                         dxfattribs={"layer": layer_name})
+        elif wall.is_vertical:
+            # Offset in X
+            msp.add_line((sx - half_t, sy), (ex - half_t, ey),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((sx + half_t, sy), (ex + half_t, ey),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((sx - half_t, sy), (sx + half_t, sy),
+                         dxfattribs={"layer": layer_name})
+            msp.add_line((ex - half_t, ey), (ex + half_t, ey),
+                         dxfattribs={"layer": layer_name})
 
 
-# ============================================================================
-# 6. COORDINATE OUTPUT
-# ============================================================================
+# ---------------------------------------------------------------------------
+# 6. Coordinate Text Output
+# ---------------------------------------------------------------------------
 
-def write_coords(dot_results, job, output_dir):
-    """Save coordinate text file."""
-    output_path = Path(output_dir) / f"{job}_coords.txt"
+def save_coordinates(dots: Dict[str, List[DetectedDot]],
+                     job: str, output_dir: str) -> str:
+    """Save detected coordinates to a text file."""
+    filename = f"{job}_coords.txt"
+    filepath = os.path.join(output_dir, filename)
 
-    with open(output_path, "w") as f:
-        f.write(f"# Sketch Coordinates — {job}\n")
-        f.write(f"# Generated by sketch_reader.py (Absolute Drafting)\n\n")
+    lines = []
+    colour_map = {"purple": "PURPLE", "blue": "BLUE", "green": "GREEN"}
 
-        for colour_name, colour_def in COLOUR_RANGES.items():
-            label = colour_def["label"]
-            dots = dot_results.get(colour_name, [])
-            refs = [d["ref"] for d in dots]
-            f.write(f"{label}: {', '.join(refs)}\n")
+    for colour_name in ["purple", "blue", "green"]:
+        dot_list = dots.get(colour_name, [])
+        coord_strs = [d.coord.slash for d in dot_list if d.coord is not None]
+        label = colour_map[colour_name]
+        lines.append(f"{label}: {', '.join(coord_strs)}")
 
-    print(f"Coordinates saved: {output_path}")
-    return output_path
+    text = "\n".join(lines) + "\n"
+    with open(filepath, "w") as f:
+        f.write(text)
+
+    print(f"  Coordinates saved: {filepath}")
+    return filepath
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Coordinate Parsing (for manual/test data input)
+# ---------------------------------------------------------------------------
+
+def parse_coord_string(s: str) -> Optional[GridCoord]:
+    """
+    Parse a slash-notation coordinate string like 'G.6/16.4' or 'D/2'.
+
+    Format: ColLabel[.digit]/RowInt[.digit]
+    """
+    s = s.strip()
+    match = re.match(r"^([A-L])(?:\.(\d))?/(\d+)(?:\.(\d))?$", s)
+    if not match:
+        return None
+
+    col_label = match.group(1)
+    col_frac = int(match.group(2)) / 10.0 if match.group(2) else 0.0
+    row_int = int(match.group(3))
+    row_frac = int(match.group(4)) / 10.0 if match.group(4) else 0.0
+
+    # Validate fractions
+    if col_frac not in VALID_DECIMALS or row_frac not in VALID_DECIMALS:
+        print(f"  WARNING: Invalid decimal in coordinate {s} "
+              f"(col_frac={col_frac}, row_frac={row_frac})")
+        col_frac = min(VALID_DECIMALS, key=lambda v: abs(v - col_frac))
+        row_frac = min(VALID_DECIMALS, key=lambda v: abs(v - row_frac))
+
+    return GridCoord(col_label=col_label, col_frac=col_frac,
+                     row_int=row_int, row_frac=row_frac)
+
+
+def parse_coord_list(text: str) -> List[GridCoord]:
+    """Parse a comma-separated list of slash-notation coordinates."""
+    coords = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        coord = parse_coord_string(part)
+        if coord:
+            coords.append(coord)
+        else:
+            print(f"  WARNING: Could not parse coordinate: '{part}'")
+    return coords
+
+
+# ---------------------------------------------------------------------------
+# Test Data: Griffiths Street known-good coordinates
+# ---------------------------------------------------------------------------
+
+GRIFFITHS_TEST_DATA = {
+    "purple": "D/2, G.6/2, G.6/2.8, K.2/2.8, K.2/6.8, J.6/6.8, J.6/8.4, K.2/8.4, K.2/16.4, G.6/16.4, G.6/18.4, D/18.4",
+    "blue": "G.6/4, K/4, K/6.8, G.6/6.8, H.8/6.8, H.8/8.4, I.6/8, G.6/8, G.6/11, K/11, K/14.2, G.6/14.2",
+    "green": "G.6/1.4, J.6/1.4, J.6/2.8, J/17.6, J/21.8, D.8/21.8",
+}
+
+
+def run_test_data(job: str, output_dir: str, scale: float = 1000.0,
+                  wall_thickness: float = 110.0) -> None:
+    """Run with Griffiths Street test data (no image needed)."""
+    print("\n=== RUNNING WITH GRIFFITHS STREET TEST DATA ===\n")
+
+    dots = {}
+    for colour_name, coord_text in GRIFFITHS_TEST_DATA.items():
+        coord_list = parse_coord_list(coord_text)
+        dot_list = []
+        for coord in coord_list:
+            x, y = coord.to_mm(scale)
+            dot = DetectedDot(px_x=0, px_y=0, area=100,
+                              colour=colour_name, coord=coord)
+            dot_list.append(dot)
+        dots[colour_name] = dot_list
+        print(f"  {colour_name}: {len(dot_list)} dots loaded")
+
+    walls = generate_walls(dots, wall_thickness)
+
+    # Build grid positions from test data (synthetic)
+    col_positions = {label: float(i) for i, label in enumerate(COLUMN_LABELS)}
+    row_positions = {i: float(i) for i in range(ROW_MIN, ROW_MAX + 1)}
+
+    # DXF output
+    dxf_path = os.path.join(output_dir, f"{job}.dxf")
+    create_dxf(walls, dots, col_positions, row_positions, scale, dxf_path)
+
+    # Coordinate text output
+    save_coordinates(dots, job, output_dir)
+
+    _print_summary(dots, walls)
+
+
+# ---------------------------------------------------------------------------
+# Summary & Main
+# ---------------------------------------------------------------------------
+
+def _print_summary(dots: Dict[str, List[DetectedDot]], walls: List[Wall]) -> None:
+    """Print a summary of detected features."""
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+
+    colour_labels = {"purple": "PURPLE (perimeter)", "blue": "BLUE (internal)",
+                     "green": "GREEN (exterior)"}
+
+    total_dots = 0
+    for colour_name in ["purple", "blue", "green"]:
+        dot_list = dots.get(colour_name, [])
+        coord_strs = [d.coord.slash for d in dot_list if d.coord is not None]
+        label = colour_labels[colour_name]
+        print(f"  {label}: {len(coord_strs)} dots")
+        if coord_strs:
+            print(f"    {', '.join(coord_strs)}")
+        total_dots += len(coord_strs)
+
+    print(f"\n  Total dots: {total_dots}")
+    print(f"  Total walls: {len(walls)}")
+
+    h_walls = [w for w in walls if w.is_horizontal]
+    v_walls = [w for w in walls if w.is_vertical]
+    print(f"    Horizontal: {len(h_walls)}")
+    print(f"    Vertical:   {len(v_walls)}")
+
+    # Wall summary by category
+    for cat in ["purple", "blue", "green"]:
+        cat_walls = [w for w in walls if w.category == cat]
+        if cat_walls:
+            print(f"\n  {colour_labels[cat]} walls ({len(cat_walls)}):")
+            for w in cat_walls:
+                direction = "H" if w.is_horizontal else "V"
+                sx, sy = w.start.to_mm()
+                ex, ey = w.end.to_mm()
+                length = abs(ex - sx) + abs(ey - sy)
+                print(f"    [{direction}] {w.start.slash} -> {w.end.slash}  "
+                      f"({length:.0f}mm, {w.thickness:.0f}mm thick)")
+
+    print("\n" + "=" * 60)
+    print("STEP 6 REMINDER: Confirm dimensions with Scott before nudging!")
+    print("=" * 60)
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Sketch Reader — Detect coloured dots on hand sketches, generate DXF",
-        epilog="Scott's 6-Step Method (Absolute Drafting)"
+        description="Sketch Reader - Detect coloured dots on architectural "
+                    "hand sketches and generate DXF files.",
+        epilog="For Scott Dellar, Absolute Drafting, NSW Australia."
     )
-    parser.add_argument("--input", required=True, help="Path to scanned PDF or image")
-    parser.add_argument("--job", required=True, help="Job name for output files")
-    parser.add_argument("--output", default=".", help="Output directory (default: current)")
-    parser.add_argument("--scale", type=int, default=1000, help="mm per grid square (default: 1000)")
-    parser.add_argument("--wall-thickness", type=int, default=110, help="Default wall thickness mm (default: 110)")
-    parser.add_argument("--min-dot-area", type=int, default=20, help="Min dot pixel area (default: 20)")
-    parser.add_argument("--debug", action="store_true", help="Save debug images")
+    parser.add_argument("--input", "-i",
+                        help="Input PDF or image file path")
+    parser.add_argument("--job", "-j", required=True,
+                        help="Job name (e.g. 25056_Griffiths)")
+    parser.add_argument("--output", "-o", default=".",
+                        help="Output directory (default: current directory)")
+    parser.add_argument("--scale", type=float, default=1000.0,
+                        help="Millimetres per grid square (default: 1000)")
+    parser.add_argument("--wall-thickness", type=float, default=110.0,
+                        help="Wall thickness in mm (default: 110)")
+    parser.add_argument("--min-dot-area", type=int, default=20,
+                        help="Minimum contour area for dot detection (default: 20)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Save debug images (colour masks)")
+    parser.add_argument("--test", action="store_true",
+                        help="Run with Griffiths Street test data (no input image needed)")
 
     args = parser.parse_args()
 
+    print("=" * 60)
+    print("SKETCH READER - Absolute Drafting")
+    print(f"Job: {args.job}")
+    print("=" * 60)
+
     # Ensure output directory exists
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(args.output, exist_ok=True)
 
-    print("=" * 60)
-    print("SKETCH READER — Absolute Drafting")
-    print("=" * 60)
-    print(f"Input:  {args.input}")
-    print(f"Job:    {args.job}")
-    print(f"Output: {output_dir}")
-    print(f"Scale:  1:{args.scale}mm per grid square")
-    print()
+    # Test mode
+    if args.test:
+        run_test_data(args.job, args.output, args.scale, args.wall_thickness)
+        return
 
-    # Step 1: Load image
-    print("[1/5] Loading image...")
-    img = load_image(args.input)
+    # Normal mode - require input file
+    if not args.input:
+        parser.error("--input is required (or use --test for test data)")
 
-    # Step 2: Detect grid
-    print("[2/5] Detecting grid...")
-    x_labels, y_labels, px_per_mm = detect_grid(img, args.scale)
+    try:
+        # Step 1: Load image
+        print("\n[STEP 1] Loading image...")
+        img = load_image(args.input)
 
-    # Step 3: Detect dots
-    print("[3/5] Detecting coloured dots...")
-    debug_dir = str(output_dir) if args.debug else None
-    dot_results = detect_dots(
-        img, x_labels, y_labels, px_per_mm, args.scale,
-        min_area=args.min_dot_area, debug=args.debug, debug_dir=debug_dir
-    )
+        # Step 2: Detect grid
+        print("\n[STEP PRE] Detecting grid...")
+        col_positions, row_positions, px_per_mm = detect_grid(img)
 
-    # Step 4: Generate walls
-    print("[4/5] Generating walls (H/V only)...")
-    walls, warnings = generate_walls(
-        dot_results, x_labels, y_labels, args.scale, args.wall_thickness
-    )
+        # Step 3: Detect dots
+        print("\n[STEPS 1-3] Detecting coloured dots...")
+        debug_dir = args.output if args.debug else None
+        dots = detect_dots(img, col_positions, row_positions,
+                           min_area=args.min_dot_area,
+                           debug=args.debug, debug_dir=debug_dir)
 
-    for w in warnings:
-        print(f"  WARNING: {w}")
+        # Step 4: Generate walls
+        print("\n[STEP 4] Generating walls (H/V only)...")
+        walls = generate_walls(dots, args.wall_thickness)
 
-    # Step 5: Write outputs
-    print("[5/5] Writing outputs...")
-    dxf_path = output_dir / f"{args.job}.dxf"
-    write_dxf(walls, dot_results, x_labels, y_labels, args.scale, dxf_path)
-    coords_path = write_coords(dot_results, args.job, output_dir)
+        # Step 5: DXF output
+        print("\n[STEP 5] Creating DXF output...")
+        dxf_path = os.path.join(args.output, f"{args.job}.dxf")
+        create_dxf(walls, dots, col_positions, row_positions,
+                   args.scale, dxf_path)
 
-    # Summary
-    purple_count = len(dot_results.get("purple", []))
-    blue_count = len(dot_results.get("blue", []))
-    green_count = len(dot_results.get("green", []))
+        # Step 6: Coordinate text output
+        print("\n[STEP 6] Saving coordinates...")
+        save_coordinates(dots, args.job, args.output)
 
-    print()
-    print("=" * 60)
-    print("DONE")
-    print(f"Found {purple_count} purple, {blue_count} blue, {green_count} green dots")
-    print(f"Generated {len(walls)} walls")
-    print(f"DXF:    {dxf_path}")
-    print(f"Coords: {coords_path}")
-    print("=" * 60)
+        # Summary
+        _print_summary(dots, walls)
+
+    except FileNotFoundError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ImportError as e:
+        print(f"\nERROR: Missing dependency - {e}", file=sys.stderr)
+        print("Install required packages: pip install pymupdf pillow numpy opencv-python ezdxf scipy",
+              file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
