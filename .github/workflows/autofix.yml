@@ -1,0 +1,38 @@
+name: Claude AutoFix
+
+# Third-party action (enriconunes/claude-autofix-action), not an Anthropic one.
+# It runs the repo's test suite on a PR and, when tests fail, asks Claude for a
+# diagnosis comment and opens a follow-up PR with a fix.
+#
+# NOTE: this repository currently has no test suite, so every run no-ops — the
+# action finds zero failures and skips its analyse/fix steps. It becomes useful
+# once tests land under tests/ (pytest) or a JS/TS runner is configured; see
+# `with:` below for the inputs to change in that case.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Claude AutoFix
+        # Pinned to the commit v2.1.2 points at. This action receives
+        # ANTHROPIC_API_KEY, and v2.1.2 is a lightweight (mutable) tag that its
+        # owner can repoint at any commit — a SHA cannot be moved under us.
+        # Bump both the SHA and the trailing comment together.
+        uses: enriconunes/claude-autofix-action@86cc82d4d18e33e99106982f12b5e2a502d5ab97 # v2.1.2
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Defaults, made explicit so they're easy to find when tests land:
+          language: python
+          test-framework: pytest
+          create-pr: "true"
+          max-fixes: "5"

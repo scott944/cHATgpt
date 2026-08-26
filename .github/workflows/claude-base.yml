@@ -1,0 +1,56 @@
+name: Claude Code (manual run)
+
+# Runs Claude Code against a prompt you supply from the Actions tab.
+# workflow_dispatch is restricted to users with write access, so the prompt is
+# trusted input — which is what claude-code-base-action requires. For anything
+# driven by untrusted input (issue bodies, fork PRs, external comments), use
+# .github/workflows/claude.yml instead; that one runs the full
+# anthropics/claude-code-action, which does the actor permission checks.
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: What should Claude do?
+        required: true
+        type: string
+      allowed_tools:
+        description: Comma-separated tool allowlist passed to --allowedTools
+        required: false
+        type: string
+        default: Read,Glob,Grep,Bash(git:*)
+      max_turns:
+        description: Maximum agent turns
+        required: false
+        type: string
+        default: "15"
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code Base Action
+        id: claude
+        uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: ${{ inputs.prompt }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --allowedTools "${{ inputs.allowed_tools }}"
+            --max-turns ${{ inputs.max_turns }}
+
+      - name: Upload execution log
+        if: always() && steps.claude.outputs.execution_file != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: claude-execution-log
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: ignore
