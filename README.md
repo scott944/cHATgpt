@@ -35,3 +35,25 @@ The base action is a thin wrapper with no trust boundary of its own, so this wor
 is deliberately `workflow_dispatch`-only — dispatch requires write access, which keeps
 the prompt trusted. Anything driven by untrusted input (issue bodies, fork PRs,
 external comments) belongs in `claude.yml`, which does the actor permission checks.
+
+### Automatic test fixes
+
+`.github/workflows/autofix.yml` runs
+[`enriconunes/claude-autofix-action`](https://github.com/enriconunes/claude-autofix-action)
+on pull requests against `main`. When the test suite fails it posts a diagnosis comment
+and opens a follow-up PR with a proposed fix.
+
+Two things to know:
+
+- **It is inert today.** This repository has no test suite, so the action finds zero
+  failures and skips its analyse and fix steps. It starts doing work once tests land
+  under `tests/` (pytest) or a JS/TS runner is configured — adjust the `language` and
+  `test-framework` inputs then.
+- **It is a third-party action** that receives `ANTHROPIC_API_KEY`, unlike the two
+  workflows above. It is pinned to the commit SHA that `v2.1.2` points at rather than
+  the tag, because a lightweight tag can be repointed at new code by its owner. Bump
+  the SHA and its trailing version comment together.
+
+It also needs **Settings → Actions → General → Workflow permissions** set to
+*Read and write*, with *Allow GitHub Actions to create and approve pull requests*
+enabled, so it can open the fix PR.
